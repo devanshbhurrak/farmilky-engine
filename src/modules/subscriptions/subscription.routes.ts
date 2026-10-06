@@ -1,0 +1,264 @@
+import { Hono } from 'hono';
+import { adminOnly } from '../../shared/middleware/adminOnly.js';
+import { auth } from '../../shared/middleware/auth.js';
+import { deliveryOrAdmin } from '../../shared/middleware/deliveryOrAdmin.js';
+import { idempotency } from '../../shared/middleware/idempotency.js';
+import { tenant } from '../../shared/middleware/tenant.js';
+import { validateBody, validateParams, validateQuery } from '../../shared/middleware/validate.js';
+import type { HonoEnv } from '../../shared/types/index.js';
+import {
+  activeForUserController,
+  adminCreateSubscriptionController,
+  adminListSubscriptionsController,
+  adminUpdateStatusController,
+  adminUpdateSubscriptionController,
+  bulkPauseController,
+  bulkResumeController,
+  cancelScheduleChangeController,
+  cancelSubscriptionController,
+  cancelVacationController,
+  createSubscriptionController,
+  deleteDeliveryEntryController,
+  deliveryBoardController,
+  getSubscriptionController,
+  listMySubscriptionsController,
+  markDeliveredController,
+  pauseSubscriptionController,
+  agentDeliveryOutcomeController,
+  recordDeliveryOutcomeController,
+  resumeSubscriptionController,
+  scheduleChangeController,
+  setVacationController,
+  skipSubscriptionController,
+  todaySupplyController,
+  unskipSubscriptionController,
+  updateSubscriptionController,
+} from './subscription.controller.js';
+import {
+  adminCreateSubscriptionSchema,
+  adminSubscriptionListQuerySchema,
+  adminUpdateSubscriptionSchema,
+  agentDeliveryOutcomeSchema,
+  bulkIdsSchema,
+  createSubscriptionSchema,
+  deliveryBoardQuerySchema,
+  deliveryEntryParamSchema,
+  pauseSubscriptionSchema,
+  recordDeliveryOutcomeSchema,
+  scheduleChangeSchema,
+  skipSubscriptionSchema,
+  statusUpdateSchema,
+  subscriptionIdParamSchema,
+  subscriptionUserParamSchema,
+  updateSubscriptionSchema,
+  vacationSubscriptionSchema,
+} from './subscription.schema.js';
+
+export const subscriptionRoutes = new Hono<HonoEnv>();
+
+// Static /admin/* routes must be defined BEFORE /:id routes so that
+// e.g. "bulk-pause" is never captured as an :id param.
+subscriptionRoutes.post(
+  '/admin/create',
+  auth,
+  tenant,
+  adminOnly,
+  idempotency,
+  validateBody(adminCreateSubscriptionSchema),
+  adminCreateSubscriptionController,
+);
+subscriptionRoutes.get(
+  '/admin/all',
+  auth,
+  tenant,
+  adminOnly,
+  validateQuery(adminSubscriptionListQuerySchema),
+  adminListSubscriptionsController,
+);
+subscriptionRoutes.get(
+  '/admin/today-supply',
+  auth,
+  tenant,
+  adminOnly,
+  validateQuery(deliveryBoardQuerySchema),
+  todaySupplyController,
+);
+subscriptionRoutes.get(
+  '/admin/delivery-board',
+  auth,
+  tenant,
+  deliveryOrAdmin,
+  validateQuery(deliveryBoardQuerySchema),
+  deliveryBoardController,
+);
+subscriptionRoutes.get(
+  '/admin/user/:userId/active',
+  auth,
+  tenant,
+  adminOnly,
+  validateParams(subscriptionUserParamSchema),
+  activeForUserController,
+);
+subscriptionRoutes.put(
+  '/admin/bulk-pause',
+  auth,
+  tenant,
+  adminOnly,
+  validateBody(bulkIdsSchema),
+  bulkPauseController,
+);
+subscriptionRoutes.put(
+  '/admin/bulk-resume',
+  auth,
+  tenant,
+  adminOnly,
+  validateBody(bulkIdsSchema),
+  bulkResumeController,
+);
+subscriptionRoutes.put(
+  '/admin/:id',
+  auth,
+  tenant,
+  adminOnly,
+  validateParams(subscriptionIdParamSchema),
+  validateBody(adminUpdateSubscriptionSchema),
+  adminUpdateSubscriptionController,
+);
+subscriptionRoutes.put(
+  '/admin/:id/status',
+  auth,
+  tenant,
+  adminOnly,
+  validateParams(subscriptionIdParamSchema),
+  validateBody(statusUpdateSchema),
+  adminUpdateStatusController,
+);
+subscriptionRoutes.put(
+  '/admin/:id/schedule-change',
+  auth,
+  tenant,
+  adminOnly,
+  validateParams(subscriptionIdParamSchema),
+  validateBody(scheduleChangeSchema),
+  scheduleChangeController,
+);
+subscriptionRoutes.delete(
+  '/admin/:id/schedule-change',
+  auth,
+  tenant,
+  adminOnly,
+  validateParams(subscriptionIdParamSchema),
+  cancelScheduleChangeController,
+);
+subscriptionRoutes.post(
+  '/admin/:id/delivery-outcome',
+  auth,
+  tenant,
+  deliveryOrAdmin,
+  idempotency,
+  validateParams(subscriptionIdParamSchema),
+  validateBody(recordDeliveryOutcomeSchema),
+  recordDeliveryOutcomeController,
+);
+subscriptionRoutes.delete(
+  '/admin/:id/delivery/:entryId',
+  auth,
+  tenant,
+  adminOnly,
+  validateParams(deliveryEntryParamSchema),
+  deleteDeliveryEntryController,
+);
+
+// Customer / agent routes
+subscriptionRoutes.post(
+  '/',
+  auth,
+  tenant,
+  idempotency,
+  validateBody(createSubscriptionSchema),
+  createSubscriptionController,
+);
+subscriptionRoutes.get('/', auth, tenant, listMySubscriptionsController);
+subscriptionRoutes.get(
+  '/:id',
+  auth,
+  tenant,
+  validateParams(subscriptionIdParamSchema),
+  getSubscriptionController,
+);
+subscriptionRoutes.put(
+  '/:id',
+  auth,
+  tenant,
+  validateParams(subscriptionIdParamSchema),
+  validateBody(updateSubscriptionSchema),
+  updateSubscriptionController,
+);
+subscriptionRoutes.put(
+  '/:id/pause',
+  auth,
+  tenant,
+  validateParams(subscriptionIdParamSchema),
+  validateBody(pauseSubscriptionSchema),
+  pauseSubscriptionController,
+);
+subscriptionRoutes.put(
+  '/:id/resume',
+  auth,
+  tenant,
+  validateParams(subscriptionIdParamSchema),
+  resumeSubscriptionController,
+);
+subscriptionRoutes.put(
+  '/:id/cancel',
+  auth,
+  tenant,
+  validateParams(subscriptionIdParamSchema),
+  cancelSubscriptionController,
+);
+subscriptionRoutes.put(
+  '/:id/skip',
+  auth,
+  tenant,
+  validateParams(subscriptionIdParamSchema),
+  validateBody(skipSubscriptionSchema),
+  skipSubscriptionController,
+);
+subscriptionRoutes.put(
+  '/:id/unskip',
+  auth,
+  tenant,
+  validateParams(subscriptionIdParamSchema),
+  validateBody(skipSubscriptionSchema),
+  unskipSubscriptionController,
+);
+subscriptionRoutes.put(
+  '/:id/vacation',
+  auth,
+  tenant,
+  validateParams(subscriptionIdParamSchema),
+  validateBody(vacationSubscriptionSchema),
+  setVacationController,
+);
+subscriptionRoutes.delete(
+  '/:id/vacation',
+  auth,
+  tenant,
+  validateParams(subscriptionIdParamSchema),
+  cancelVacationController,
+);
+subscriptionRoutes.post(
+  '/:id/delivery-outcome',
+  auth,
+  tenant,
+  validateParams(subscriptionIdParamSchema),
+  validateBody(agentDeliveryOutcomeSchema),
+  agentDeliveryOutcomeController,
+);
+subscriptionRoutes.post(
+  '/:id/mark-delivered',
+  auth,
+  tenant,
+  validateParams(subscriptionIdParamSchema),
+  markDeliveredController,
+);
