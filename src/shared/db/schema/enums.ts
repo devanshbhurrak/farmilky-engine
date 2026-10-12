@@ -157,6 +157,8 @@ export const collectionStatusEnum = pgEnum('collection_status', ['pending', 'con
 
 export const deliveryRoleEnum = pgEnum('delivery_role', ['delivery', 'delivery_partner', 'agent']);
 
+export type DeliveryRole = (typeof deliveryRoleEnum.enumValues)[number];
+
 export const contactStatusEnum = pgEnum('contact_status', ['unread', 'read', 'replied']);
 
 export const lineItemCategoryEnum = pgEnum('line_item_category', [

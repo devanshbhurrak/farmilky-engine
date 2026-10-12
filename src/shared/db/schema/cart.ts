@@ -1,4 +1,4 @@
-import { check, index, integer, pgTable, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { check, index, integer, pgTable, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import { tenants } from './tenants.js';
 import { users } from './users.js';
@@ -32,6 +32,14 @@ export const cartItems = pgTable(
   },
   (t) => [
     index('cart_items_cart_idx').on(t.cartId),
+    // Duplicate detection mirrors findCartItemByProduct (cart + product +
+    // variant). Variant is part of the key so two variants of the same
+    // product can coexist as separate lines. The partial index covers the
+    // NULL-variant case (plain unique indexes treat NULLs as distinct).
+    uniqueIndex('cart_items_cart_product_unique').on(t.cartId, t.productId, t.variantId),
+    uniqueIndex('cart_items_cart_product_novariant_unique')
+      .on(t.cartId, t.productId)
+      .where(sql`${t.variantId} IS NULL`),
     check('cart_items_qty_check', sql`${t.quantity} > 0`),
   ],
 );

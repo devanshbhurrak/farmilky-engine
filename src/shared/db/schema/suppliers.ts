@@ -45,7 +45,12 @@ export const suppliers = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('suppliers_tenant_active_idx').on(t.tenantId, t.isActive)],
+  (t) => [
+    index('suppliers_tenant_active_idx').on(t.tenantId, t.isActive),
+    // Bounded like users.account_balance — supplier balances may legitimately
+    // go either way but never to an absurd value.
+    check('suppliers_balance_bounded', sql`${t.balance} >= -999999.99 AND ${t.balance} <= 9999999.99`),
+  ],
 );
 
 export const milkCollections = pgTable(

@@ -36,11 +36,19 @@ dbOnly('manifests – generation', () => {
     } as never);
     const userId = cust.user.id as string;
 
-    // Assign customer to area
+    // Assign customer to area and create address
     const { db } = await import('../../shared/db/client.js');
-    const { users } = await import('../../shared/db/schema/index.js');
+    const { users, userAddresses } = await import('../../shared/db/schema/index.js');
     const { eq } = await import('drizzle-orm');
     await db.update(users).set({ assignedAreaId: area.id } as never).where(eq(users.id, userId));
+    await db.insert(userAddresses).values({
+      tenantId,
+      userId,
+      street: '123 Main St',
+      city: 'City',
+      pincode: '400001',
+      isDefault: true,
+    } as never);
 
     const product = await createProduct(tenantId, {
       name: 'Milk',
@@ -49,15 +57,15 @@ dbOnly('manifests – generation', () => {
     } as never);
     const variantId = (product.variants as Array<{ id: string }>)[0].id;
 
-    // Create morning subscription
+    const today = toDateOnlyString(istToday());
+
+    // Create morning subscription starting today
     await createSubscription(
       tenantId,
       userId,
-      { productId: product.id, variantId, quantityPerDelivery: 1, deliverySlot: 'morning' } as never,
+      { productId: product.id, variantId, quantityPerDelivery: 1, deliverySlot: 'morning', startDate: today, areaId: area.id } as never,
       adminId,
     );
-
-    const today = toDateOnlyString(istToday());
 
     // Generate manifests for today morning
     const result = await generateManifestsForDate(tenantId, today, 'morning');

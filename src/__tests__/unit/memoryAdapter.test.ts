@@ -140,4 +140,24 @@ describe('MemoryAdapter', () => {
     vi.advanceTimersByTime(2000);
     expect(await cache.get('k')).toBe('v2'); // still alive
   });
+
+  // ─── setIfAbsent (distributed lock primitive) ──────────────────────────────
+
+  it('setIfAbsent acquires a free lock', async () => {
+    expect(await cache.setIfAbsent('lock', '1', 5)).toBe(true);
+    expect(await cache.get('lock')).toBe('1');
+  });
+
+  it('setIfAbsent refuses a held lock', async () => {
+    await cache.setIfAbsent('lock', '1', 60);
+    expect(await cache.setIfAbsent('lock', '1', 60)).toBe(false);
+  });
+
+  it('setIfAbsent succeeds again after the TTL expires', async () => {
+    vi.useFakeTimers();
+    expect(await cache.setIfAbsent('lock', '1', 1)).toBe(true);
+    expect(await cache.setIfAbsent('lock', '1', 60)).toBe(false);
+    vi.advanceTimersByTime(1001);
+    expect(await cache.setIfAbsent('lock', '1', 60)).toBe(true);
+  });
 });

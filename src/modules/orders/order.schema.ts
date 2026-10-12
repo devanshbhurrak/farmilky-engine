@@ -29,7 +29,8 @@ export const placeOrderSchema = z.object({
 export const orderItemInputSchema = z.object({
   productId: uuid,
   variantId: uuid.optional(),
-  quantity: z.number().int().positive(),
+  // Coerce: JSON numbers may arrive as strings — without this, quantity * price = NaN.
+  quantity: z.coerce.number().int().positive(),
 });
 
 export const adminCreateOrderSchema = z.object({

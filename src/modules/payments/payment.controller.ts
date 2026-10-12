@@ -9,7 +9,7 @@ import type {
   RecordPaymentInput,
   UpdatePaymentInput,
 } from './payment.schema.js';
-import { deletePayment, getPassbook, recordPayment, updatePayment } from './payment.service.js';
+import { deletePayment, getPassbook, reconcilePayment, recordPayment, updatePayment } from './payment.service.js';
 
 export const myPassbookController = async (c: Context) => {
   const user = c.get('user') as AuthUser;
@@ -39,6 +39,13 @@ export const updatePaymentController = async (c: Context) => {
   const body = c.get('body') as UpdatePaymentInput;
   const updated = await updatePayment(params.id, user.tenantId, body, user.id);
   return ok(c, updated);
+};
+
+export const reconcilePaymentController = async (c: Context) => {
+  const user = c.get('user') as AuthUser;
+  const params = c.get('params') as PaymentIdParam;
+  const result = await reconcilePayment(params.id, user.tenantId, user.id);
+  return ok(c, result);
 };
 
 export const deletePaymentController = async (c: Context) => {

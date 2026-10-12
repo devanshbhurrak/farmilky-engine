@@ -7,6 +7,7 @@ import { getCache } from '../../shared/cache/index.js';
 import { generateTokenId, sha256 } from '../../shared/utils/crypto.js';
 import { AppError } from '../../shared/middleware/errorHandler.js';
 import type { DBOrTx, DrizzleTx } from '../../shared/types/index.js';
+import type { TenantSettings } from '../../shared/db/schema/tenants.js';
 import type { RegisterTenantInput, UpdateTenantInput } from './tenant.schema.js';
 import {
   createTenant,
@@ -117,7 +118,19 @@ export class TenantService {
 
   static async update(tenantId: string, input: UpdateTenantInput, tx?: DrizzleTx) {
     const run = async (dbOrTx: DBOrTx) => {
-      const updated = await updateTenantById(tenantId, input, dbOrTx);
+      // Merge tenantSettings with the stored object so a partial patch (e.g.
+      // only vacationMaxDays) never wipes the other keys.
+      const { tenantSettings, ...rest } = input;
+      const patch: typeof rest & { tenantSettings?: TenantSettings } = { ...rest };
+      if (tenantSettings !== undefined) {
+        const current = await findTenantById(tenantId, dbOrTx);
+        if (!current) throw new AppError('Tenant not found', 404);
+        patch.tenantSettings = {
+          ...((current.tenantSettings ?? {}) as TenantSettings),
+          ...tenantSettings,
+        };
+      }
+      const updated = await updateTenantById(tenantId, patch, dbOrTx);
       if (!updated) throw new AppError('Tenant not found', 404);
       return updated;
     };

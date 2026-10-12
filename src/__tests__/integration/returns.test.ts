@@ -69,7 +69,7 @@ dbOnly('returns flow', () => {
       reason: 'Wrong product delivered',
       items,
     });
-    expect((ret as { status: string }).status).toBe('pending');
+    expect((ret as { status: string }).status).toBe('requested');
 
     // Approve return with refund
     const refundAmt = 160; // 2 × 80

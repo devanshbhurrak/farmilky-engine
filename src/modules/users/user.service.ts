@@ -25,10 +25,8 @@ import {
   createUser,
   ensureAgentProfile,
   findUserByEmail,
-  findUserByEmailGlobal,
   findUserById,
   findUserByPhone,
-  findUserByPhoneGlobal,
   findValidRefreshTokenByHash,
   getActiveSubscriptions,
   getRecentOrders,
@@ -110,26 +108,23 @@ export class AuthService {
 
   static async login(input: LoginInput, headerSlug?: string, tx?: DrizzleTx) {
     const run = async (dbOrTx: DBOrTx) => {
+      // tenantSlug is required (enforced by Zod schema) to prevent cross-tenant
+      // auth bypass. The header is accepted as a fallback for legacy clients.
       const slug = resolveTenantSlug(input.tenantSlug, headerSlug);
-      let tenant: { id: string } | undefined;
+      if (!slug) throw new AppError('tenantSlug is required', 400);
+
+      const found = await findTenantBySlug(slug, dbOrTx);
+      if (!found) throw new AppError('Unknown tenant', 400);
+      const tenant: { id: string } = found;
+
       let user:
         | Awaited<ReturnType<typeof findUserByEmail>>
         | Awaited<ReturnType<typeof findUserByPhone>>
         | undefined;
+      user = await findUserByEmail(tenant.id, input.emailOrPhone, dbOrTx);
+      if (!user) user = await findUserByPhone(tenant.id, input.emailOrPhone, dbOrTx);
 
-      if (slug) {
-        const found = await findTenantBySlug(slug, dbOrTx);
-        if (!found) throw new AppError('Unknown tenant', 400);
-        tenant = found;
-        user = await findUserByEmail(tenant.id, input.emailOrPhone, dbOrTx);
-        if (!user) user = await findUserByPhone(tenant.id, input.emailOrPhone, dbOrTx);
-      } else {
-        user = await findUserByEmailGlobal(input.emailOrPhone, dbOrTx);
-        if (!user) user = await findUserByPhoneGlobal(input.emailOrPhone, dbOrTx);
-        if (user) tenant = { id: user.tenantId };
-      }
-
-      if (!user || !tenant) throw new AppError('Invalid credentials', 401);
+      if (!user) throw new AppError('Invalid credentials', 401);
       const match = await bcrypt.compare(input.password, user.passwordHash);
       if (!match) throw new AppError('Invalid credentials', 401);
       if (user.isActive === false) throw new AppError('Account disabled', 401);

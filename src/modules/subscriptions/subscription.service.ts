@@ -4,6 +4,7 @@ import { AppError } from '../../shared/middleware/errorHandler.js';
 import { logger } from '../../shared/utils/logger.js';
 import type { DBOrTx, DrizzleTx } from '../../shared/types/index.js';
 import {
+  differenceInCalendarDays,
   istToday,
   normalizeDate,
   round2,
@@ -14,8 +15,11 @@ import {
   findProductById,
   findVariantById,
   findVariantsByProductId,
+  incrementVariantStockRow,
 } from '../products/product.repository.js';
-import { resolvePrice } from '../products/product.service.js';
+import { decrementVariantStock, resolvePrice } from '../products/product.service.js';
+import { decrementProductStockRow, incrementProductStockRow } from '../orders/order.repository.js';
+import { getTenantSettings } from '../tenants/tenant.settings.js';
 import { transactionService } from '../transactions/transaction.service.js';
 import type { Subscription } from '../../shared/db/schema/index.js';
 import type { subscriptionChanges } from '../../shared/db/schema/index.js';
@@ -131,6 +135,59 @@ async function resolveSubscriptionVariant(
   const variant = variants.find((v) => v.isDefault) ?? variants[0];
   if (!variant) throw new AppError('No variants available for product', 404);
   return { product, variant };
+}
+
+async function decrementStockForDelivery(
+  tenantId: string,
+  variantId: string | null | undefined,
+  productId: string,
+  qty: number,
+  dbOrTx: DBOrTx,
+): Promise<void> {
+  if (!(qty > 0)) return;
+  if (variantId) {
+    await decrementVariantStock(tenantId, variantId, qty, dbOrTx);
+    return;
+  }
+  const updated = await decrementProductStockRow(tenantId, productId, qty, dbOrTx);
+  if (updated.length === 0) {
+    throw new AppError('Insufficient stock for product', 409);
+  }
+}
+
+/**
+ * Inverse of decrementStockForDelivery: puts back stock consumed by a
+ * previous chargeable outcome (re-record replaces it, history delete removes
+ * it). Warns instead of throwing when the product/variant row is gone —
+ * there is no stock left to restore in that case.
+ */
+async function restoreStockForDelivery(
+  tenantId: string,
+  variantId: string | null | undefined,
+  productId: string | null | undefined,
+  qty: number,
+  dbOrTx: DBOrTx,
+): Promise<void> {
+  if (!(qty > 0)) return;
+  if (variantId) {
+    const rows = await incrementVariantStockRow(tenantId, variantId, qty, dbOrTx);
+    if (rows.length === 0) {
+      logger.warn({ tenantId, variantId }, 'Stock restore skipped — variant row missing');
+    }
+    return;
+  }
+  if (!productId) {
+    logger.warn({ tenantId }, 'Stock restore skipped — no product reference');
+    return;
+  }
+  const rows = await incrementProductStockRow(tenantId, productId, qty, dbOrTx);
+  if (rows.length === 0) {
+    logger.warn({ tenantId, productId }, 'Stock restore skipped — product row missing/deleted');
+  }
+}
+
+function isChargeableOutcome(status: string): boolean {
+  return status === 'delivered' || status === 'partial' || status === 'extra';
 }
 
 function snapshotOf(sub: Subscription): Record<string, unknown> {
@@ -256,7 +313,7 @@ export async function recordDeliveryOutcome(
       t,
     );
     if (existing) {
-      if (existing.status !== 'skipped' && existing.status !== 'failed') {
+      if (isChargeableOutcome(existing.status)) {
         const linked = await findActiveTransactionByReference(
           tenantId,
           'subscription_delivery',
@@ -272,6 +329,15 @@ export async function recordDeliveryOutcome(
             t,
           );
         }
+        // The old outcome consumed stock — put it back before the new outcome
+        // decrements again.
+        await restoreStockForDelivery(
+          tenantId,
+          sub.variantId,
+          sub.productId,
+          num(existing.actualQuantity),
+          t,
+        );
       }
       await deleteDeliveryRow(tenantId, existing.id, t);
     }
@@ -282,6 +348,15 @@ export async function recordDeliveryOutcome(
         throw new AppError('actualQuantity must be positive for partial/extra outcomes', 422);
       }
       qty = params.actualQuantity;
+      // Quantity bounds against the scheduled quantity: partial must be
+      // strictly less than scheduled; extra has a 3x ceiling.
+      const scheduledQty = num(sub.quantityPerDelivery);
+      if (params.status === 'partial' && qty >= scheduledQty) {
+        throw new AppError('Partial delivery quantity must be less than scheduled', 422);
+      }
+      if (params.status === 'extra' && qty > scheduledQty * 3) {
+        throw new AppError('Extra delivery quantity exceeds allowed ceiling', 422);
+      }
     } else if (params.status === 'delivered') {
       qty = num(sub.quantityPerDelivery);
     } else {
@@ -342,6 +417,9 @@ export async function recordDeliveryOutcome(
         t,
       );
       transactionId = txn.id;
+      // Mirror orders: decrement inventory on chargeable delivery outcomes
+      // (delivered/partial/extra) so subscription stock never drifts.
+      await decrementStockForDelivery(tenantId, sub.variantId, sub.productId, qty, t);
     }
 
     if (params.deliveryDate >= todayStr()) {
@@ -431,6 +509,16 @@ export async function deleteDeliveryHistoryEntry(
         tenantId,
         'Delivery history entry deleted',
         adminId,
+        t,
+      );
+    }
+    if (isChargeableOutcome(entry.status)) {
+      // The deleted outcome had consumed stock — restore it.
+      await restoreStockForDelivery(
+        tenantId,
+        sub.variantId,
+        sub.productId,
+        num(entry.actualQuantity),
         t,
       );
     }
@@ -572,10 +660,12 @@ export async function setVacation(
     if (!(input.vacationFrom < input.vacationUntil)) {
       throw new AppError('vacationFrom must be before vacationUntil', 422);
     }
-    const VACATION_MAX_DAYS = 90;
-    const spanDays =
-      (normalizeDate(input.vacationUntil).getTime() - normalizeDate(input.vacationFrom).getTime()) /
-      86_400_000;
+    // Per-tenant override lives in tenants.tenant_settings.vacationMaxDays.
+    const { vacationMaxDays: VACATION_MAX_DAYS } = await getTenantSettings(tenantId, t);
+    const spanDays = differenceInCalendarDays(
+      normalizeDate(input.vacationUntil),
+      normalizeDate(input.vacationFrom),
+    );
     if (spanDays > VACATION_MAX_DAYS) {
       throw new AppError(`Vacation cannot exceed ${VACATION_MAX_DAYS} days`, 422);
     }

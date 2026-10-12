@@ -69,7 +69,9 @@ export const subscriptions = pgTable(
     index('subs_tenant_status_next_idx').on(t.tenantId, t.status, t.nextDeliveryDate),
     index('subs_tenant_area_idx').on(t.tenantId, t.areaId),
     index('subs_tenant_next_slot_idx').on(t.tenantId, t.nextDeliveryDate, t.deliverySlot),
+    index('subs_tenant_product_idx').on(t.tenantId, t.productId),
     check('subs_qty_check', sql`${t.quantityPerDelivery} > 0`),
+    check('subs_price_positive', sql`${t.pricePerPacket} > 0`),
   ],
 );
 

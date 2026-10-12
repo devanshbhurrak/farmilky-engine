@@ -1,4 +1,5 @@
 import {
+  boolean,
   check,
   date,
   index,
@@ -45,6 +46,9 @@ export const transactions = pgTable(
     paymentRef: text('payment_ref'),
     receivedDate: date('received_date'),
     status: transactionStatusEnum('status').notNull().default('active'),
+    // Manual confirmation flag for UPI/bank-transfer payments (see
+    // PATCH /api/payments/:id/reconcile). Defaults to false.
+    reconciled: boolean('reconciled').notNull().default(false),
     voidedByTxnId: uuid('voided_by_txn_id'),
     correctsTxnId: uuid('corrects_txn_id'),
     voidReason: text('void_reason'),

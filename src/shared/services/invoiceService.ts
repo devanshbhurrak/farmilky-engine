@@ -237,6 +237,12 @@ export async function generateInvoice(
   if (billingCutoffDate && !/^\d{4}-\d{2}-\d{2}$/.test(billingCutoffDate)) {
     throw new AppError('billingCutoffDate must be YYYY-MM-DD', 400);
   }
+  if (billingCutoffDate) {
+    // Regex alone accepts impossible dates (e.g. 2024-02-30) — verify it is a
+    // real calendar date.
+    const d = new Date(billingCutoffDate);
+    if (Number.isNaN(d.getTime())) throw new AppError('Invalid billingCutoffDate', 400);
+  }
 
   return withTransaction(async (tx) => {
     const mm = String(month).padStart(2, '0');

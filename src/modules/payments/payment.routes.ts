@@ -9,6 +9,7 @@ import type { HonoEnv } from '../../shared/types/index.js';
 import {
   deletePaymentController,
   myPassbookController,
+  reconcilePaymentController,
   recordPaymentController,
   updatePaymentController,
   userPassbookController,
@@ -26,8 +27,9 @@ export const paymentRoutes = new Hono<HonoEnv>();
 
 // Recording a payment is allowed for admins and delivery partners.
 const adminOrDeliveryPartner = createMiddleware<HonoEnv>(async (c, next) => {
-  const role = c.get('user').role;
-  if (role !== 'admin' && role !== 'delivery_partner') {
+  const user = c.get('user');
+  if (!user) return c.json({ success: false, message: 'Unauthorized' }, 401);
+  if (user.role !== 'admin' && user.role !== 'delivery_partner') {
     return c.json({ success: false, message: 'Forbidden' }, 403);
   }
   await next();
@@ -71,4 +73,13 @@ paymentRoutes.delete(
   validateParams(paymentIdParamSchema),
   validateBody(deletePaymentSchema),
   deletePaymentController,
+);
+// Manual confirmation of UPI/bank-transfer payments (admin only).
+paymentRoutes.patch(
+  '/:id/reconcile',
+  auth,
+  tenant,
+  adminOnly,
+  validateParams(paymentIdParamSchema),
+  reconcilePaymentController,
 );

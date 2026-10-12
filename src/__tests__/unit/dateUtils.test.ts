@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   addDays,
+  differenceInCalendarDays,
   isBefore,
   isSameDay,
   normalizeDate,
   round2,
+  subMonths,
   toDateOnlyString,
 } from '../../shared/utils/dateUtils.js';
 
@@ -133,5 +135,42 @@ describe('round2', () => {
 
   it('zero remains zero', () => {
     expect(round2(0)).toBe(0);
+  });
+});
+
+describe('subMonths', () => {
+  it('subtracts within the same year', () => {
+    const d = subMonths(new Date(2026, 5, 15), 1);
+    expect(d.getFullYear()).toBe(2026);
+    expect(d.getMonth()).toBe(4);
+    expect(d.getDate()).toBe(15);
+  });
+
+  it('rolls January back to December of the previous year', () => {
+    const d = subMonths(new Date(2026, 0, 15), 1);
+    expect(d.getFullYear()).toBe(2025);
+    expect(d.getMonth()).toBe(11);
+    expect(d.getDate()).toBe(15);
+  });
+
+  it('clamps to the last valid day (Mar 31 minus 1 month → Feb 28)', () => {
+    const d = subMonths(new Date(2026, 2, 31), 1);
+    expect(d.getFullYear()).toBe(2026);
+    expect(d.getMonth()).toBe(1);
+    expect(d.getDate()).toBe(28);
+  });
+});
+
+describe('differenceInCalendarDays', () => {
+  it('counts whole calendar days ignoring time-of-day', () => {
+    expect(differenceInCalendarDays('2026-01-10', '2026-01-01')).toBe(9);
+    expect(
+      differenceInCalendarDays(new Date(2026, 0, 2, 23, 59), new Date(2026, 0, 1, 0, 1)),
+    ).toBe(1);
+  });
+
+  it('is zero for the same day and negative when reversed', () => {
+    expect(differenceInCalendarDays('2026-04-05', '2026-04-05')).toBe(0);
+    expect(differenceInCalendarDays('2026-04-01', '2026-04-05')).toBe(-4);
   });
 });

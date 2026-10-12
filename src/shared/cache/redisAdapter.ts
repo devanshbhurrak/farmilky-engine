@@ -43,6 +43,18 @@ export class RedisAdapter implements CacheAdapter {
     return count;
   }
 
+  async setIfAbsent(key: string, value: unknown, ttlSeconds: number): Promise<boolean> {
+    const raw = typeof value === 'string' ? value : JSON.stringify(value);
+    const result = await this.client.set(
+      key,
+      raw,
+      'EX',
+      Math.max(1, Math.floor(ttlSeconds)),
+      'NX',
+    );
+    return result === 'OK';
+  }
+
   async disconnect(): Promise<void> {
     this.client.disconnect();
   }

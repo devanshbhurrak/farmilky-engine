@@ -34,8 +34,9 @@ import {
 } from './order.schema.js';
 
 const customerOrAdmin = createMiddleware<HonoEnv>(async (c, next) => {
-  const role = c.get('user').role;
-  if (role !== 'customer' && role !== 'admin') {
+  const user = c.get('user');
+  if (!user) return c.json({ success: false, message: 'Unauthorized' }, 401);
+  if (user.role !== 'customer' && user.role !== 'admin') {
     return c.json({ success: false, message: 'Forbidden' }, 403);
   }
   await next();

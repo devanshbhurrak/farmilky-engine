@@ -23,6 +23,13 @@ export const updateTenantSchema = z.object({
   upiName: z.string().optional(),
   brandLogoUrl: z.string().optional(),
   backendUrl: z.string().optional(),
+  // Per-tenant business-rule overrides (return window, vacation cap, ...).
+  tenantSettings: z
+    .object({
+      returnWindowMs: z.number().positive().optional(),
+      vacationMaxDays: z.number().int().positive().optional(),
+    })
+    .optional(),
 });
 
 export type UpdateTenantInput = z.infer<typeof updateTenantSchema>;

@@ -40,6 +40,7 @@ export interface InsertTxnRow {
   paymentRef?: string | null;
   receivedDate?: string | null;
   status?: 'active' | 'voided' | 'deleted';
+  reconciled?: boolean;
   voidedByTxnId?: string | null;
   correctsTxnId?: string | null;
   voidReason?: string | null;
@@ -83,6 +84,31 @@ export async function findTransactionById(id: string, tenantId: string, tx: Driz
     .select()
     .from(transactions)
     .where(and(eq(transactions.id, id), eq(transactions.tenantId, tenantId)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function findActiveTransactionByRef(
+  tenantId: string,
+  referenceType: NonNullable<InsertTxnRow['referenceType']>,
+  referenceId: string,
+  tx: DrizzleTx | DBOrTx = db,
+) {
+  // Mirrors the subscription-delivery lookup: excludes reversal rows and
+  // prefers the earliest charge so a re-record never voids a reversal.
+  const rows = await tx
+    .select()
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.tenantId, tenantId),
+        eq(transactions.referenceType, referenceType),
+        eq(transactions.referenceId, referenceId),
+        eq(transactions.status, 'active' as const),
+        sql`NOT EXISTS (SELECT 1 FROM transactions r WHERE r.voided_by_txn_id = transactions.id)`,
+      ),
+    )
+    .orderBy(transactions.createdAt)
     .limit(1);
   return rows[0] ?? null;
 }

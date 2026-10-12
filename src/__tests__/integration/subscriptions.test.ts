@@ -128,7 +128,7 @@ dbOnly('subscriptions – pause and resume', () => {
 
     const resumed = await resumeSubscription(tenantId, sub.id, userId);
     expect((resumed as { status: string }).status).toBe('active');
-    expect(isSubscriptionDueOnDate(resumed as never, new Date())).toBe(true);
+    expect(isSubscriptionDueOnDate(resumed as never, (resumed as { nextDeliveryDate: string }).nextDeliveryDate)).toBe(true);
   });
 });
 

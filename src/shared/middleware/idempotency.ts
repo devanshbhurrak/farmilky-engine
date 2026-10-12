@@ -1,4 +1,5 @@
 import { createMiddleware } from 'hono/factory';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { HonoEnv } from '../types/index.js';
 import { getCache } from '../cache/index.js';
 import { sha256 } from '../utils/crypto.js';
@@ -36,7 +37,7 @@ export const idempotency = createMiddleware<HonoEnv>(async (c, next) => {
   const cache = getCache();
   const cached = await cache.get<{ status: number; body: unknown }>(key);
   if (cached) {
-    return c.json(cached.body, cached.status as 200);
+    return c.json(cached.body, cached.status as ContentfulStatusCode);
   }
 
   await next();

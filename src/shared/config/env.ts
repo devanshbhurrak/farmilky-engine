@@ -1,8 +1,16 @@
-const required = ['DATABASE_URL', 'JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET'];
+const required = ['DATABASE_URL', 'JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET', 'CRON_SECRET'];
+
+const CRON_SECRET_MIN_LENGTH = 16;
 
 export function validateEnv(): void {
   const missing = required.filter((k) => !process.env[k]);
   if (missing.length) throw new Error(`Missing env vars: ${missing.join(', ')}`);
+  const cronSecret = process.env.CRON_SECRET ?? '';
+  if (cronSecret.length < CRON_SECRET_MIN_LENGTH) {
+    throw new Error(
+      `CRON_SECRET must be at least ${CRON_SECRET_MIN_LENGTH} characters (fail-fast: refusing to start with a weak/missing cron secret)`,
+    );
+  }
 }
 
 function parseOrigins(): string[] {

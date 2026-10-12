@@ -58,9 +58,9 @@ dbOnly('invoices flow', () => {
     expect(Number((first.invoice as { netAmountDue: string }).netAmountDue)).toBe(1000);
     expect((first.invoice as { status: string }).status).toBe('draft');
 
-    // 3. Generate again without force → returns existing (no re-creation)
+    // 3. Generate again without force → returns skipped (no re-creation)
     const existing = await generateInvoice(tenantId, userId, month, year, {});
-    expect(existing.action).toBe('existing');
+    expect(existing.action).toBe('skipped');
     expect((existing.invoice as { id: string }).id).toBe((first.invoice as { id: string }).id);
 
     // 4. Force regenerate → voids old, creates new

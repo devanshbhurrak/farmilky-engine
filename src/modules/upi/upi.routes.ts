@@ -3,6 +3,7 @@ import { db } from '../../shared/db/client.js';
 import { tenants } from '../../shared/db/schema/index.js';
 import { eq } from 'drizzle-orm';
 import { AppError } from '../../shared/middleware/errorHandler.js';
+import { createLimiter } from '../../shared/middleware/rateLimiter.js';
 
 async function resolveTenant(slug: string | undefined, tenantId: string | undefined) {
   if (tenantId) {
@@ -38,6 +39,10 @@ function upiHtmlPage(upiUrl: string, tenantName: string): string {
 }
 
 export const upiRoutes = new Hono();
+
+// Public endpoint is enumerable by tenantId/slug — rate-limit it.
+const upiLimiter = createLimiter(30, 15 * 60 * 1000);
+upiRoutes.use('/pay/upi', upiLimiter);
 
 upiRoutes.on(['GET', 'POST'], '/pay/upi', async (c) => {
   const url = new URL(c.req.url);

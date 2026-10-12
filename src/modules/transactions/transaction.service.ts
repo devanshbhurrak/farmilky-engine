@@ -1,8 +1,10 @@
-import { sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { withTransaction, type DrizzleTx } from '../../shared/db/transaction.js';
 import { generateTxnNumber } from '../../shared/utils/txnNumber.js';
 import { AppError } from '../../shared/middleware/errorHandler.js';
+import { suppliers, users } from '../../shared/db/schema/index.js';
 import {
+  findActiveTransactionByRef,
   findItemsByTransactionId,
   findTransactionById,
   insertTransaction,
@@ -267,32 +269,50 @@ export class TransactionService {
     if (partyType === 'business' || !partyId) return;
     const delta = computeDelta(partyType, entryType, amount);
     if (delta === 0) return;
-    // Tenant-scoped with RETURNING: a 0-row update (deleted/wrong-tenant
+    // Tenant-scoped with .returning(): a 0-row update (deleted/wrong-tenant
     // party) throws instead of silently diverging ledger from balance cache.
     if (partyType === 'customer') {
-      const rows = await tx.execute(
-        sql`UPDATE users SET account_balance = account_balance + ${delta} WHERE id = ${partyId} AND tenant_id = ${tenantId} RETURNING id`,
-      );
-      if (resultRowCount(rows) === 0) {
+      const updated = await tx
+        .update(users)
+        .set({ accountBalance: sql`account_balance + ${delta}` })
+        .where(and(eq(users.id, partyId), eq(users.tenantId, tenantId)))
+        .returning({ id: users.id });
+      if (updated.length === 0) {
         throw new AppError('Party not found for balance update', 404);
       }
     } else if (partyType === 'supplier') {
-      const rows = await tx.execute(
-        sql`UPDATE suppliers SET balance = balance + ${delta} WHERE id = ${partyId} AND tenant_id = ${tenantId} RETURNING id`,
-      );
-      if (resultRowCount(rows) === 0) {
+      const updated = await tx
+        .update(suppliers)
+        .set({ balance: sql`balance + ${delta}` })
+        .where(and(eq(suppliers.id, partyId), eq(suppliers.tenantId, tenantId)))
+        .returning({ id: suppliers.id });
+      if (updated.length === 0) {
         throw new AppError('Party not found for balance update', 404);
       }
     }
   }
-}
 
-function resultRowCount(result: unknown): number {
-  const r = result as { rowCount?: number; count?: number; length?: number };
-  if (typeof r?.rowCount === 'number') return r.rowCount;
-  if (typeof r?.count === 'number') return r.count;
-  if (Array.isArray(result)) return result.length;
-  return 1;
+  /**
+   * Void the active transaction linked to a domain reference (e.g. a return
+   * refund created for `referenceType='return'`, `referenceId=returnId`).
+   * No-op when no active linked transaction exists.
+   */
+  async voidTransactionByRef(
+    referenceId: string,
+    referenceType: 'return' | 'order' | 'subscription_delivery' | 'invoice' | 'milk_collection' | 'manual',
+    tenantId: string,
+    reason: string,
+    adminId: string,
+    tx?: DrizzleTx,
+  ) {
+    const run = async (t: DrizzleTx) => {
+      const linked = await findActiveTransactionByRef(tenantId, referenceType, referenceId, t);
+      if (!linked) return null;
+      return this.voidTransaction(linked.id, tenantId, reason, adminId, t);
+    };
+    if (tx) return run(tx);
+    return withTransaction(run);
+  }
 }
 
 export const transactionService = new TransactionService();

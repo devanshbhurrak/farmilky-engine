@@ -1,5 +1,6 @@
 import {
   boolean,
+  check,
   date,
   index,
   integer,
@@ -47,6 +48,9 @@ export const users = pgTable(
     index('users_tenant_role_idx').on(t.tenantId, t.role),
     index('users_tenant_area_role_idx').on(t.tenantId, t.assignedAreaId, t.role),
     index('users_tenant_active_idx').on(t.tenantId, t.isActive),
+    // Negative balances are allowed (credit terms) but bounded so a bug can
+    // never drive the ledger cache to an absurd value.
+    check('users_balance_non_negative', sql`${t.accountBalance} >= -99999.99`),
   ],
 );
 

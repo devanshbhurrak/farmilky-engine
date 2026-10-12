@@ -4,11 +4,22 @@ import type { HonoEnv } from '../types/index.js';
 
 export const validateBody = <T extends ZodSchema>(schema: T) =>
   createMiddleware<HonoEnv>(async (c, next) => {
-    let json: unknown = {};
+    // An empty body is legitimate (e.g. cookie-based POST /users/refresh with
+    // no JSON payload) and validates as {}. A non-empty body that fails to
+    // parse is a 400 instead of silently validating as {}.
+    let raw = '';
     try {
-      json = await c.req.json();
+      raw = await c.req.text();
     } catch {
-      json = {};
+      return c.json({ success: false, message: 'Invalid request body' }, 400);
+    }
+    let json: unknown = {};
+    if (raw.trim() !== '') {
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        return c.json({ success: false, message: 'Invalid JSON body' }, 400);
+      }
     }
     const result = schema.safeParse(json);
     if (!result.success) {

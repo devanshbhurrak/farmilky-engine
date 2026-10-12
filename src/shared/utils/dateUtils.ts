@@ -51,3 +51,20 @@ export function toDateOnlyString(d: Date | string): string {
 export function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
+
+/** Subtract `n` calendar months, clamping to the last valid day (date-fns subMonths equivalent). */
+export function subMonths(d: Date | string, n: number): Date {
+  const src = new Date(d);
+  const day = src.getDate();
+  const target = new Date(src.getFullYear(), src.getMonth() - n, 1);
+  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+  target.setDate(Math.min(day, lastDay));
+  return target;
+}
+
+/** Calendar-day difference ignoring time-of-day (date-fns differenceInCalendarDays equivalent). */
+export function differenceInCalendarDays(a: Date | string, b: Date | string): number {
+  return Math.round(
+    (normalizeDate(a).getTime() - normalizeDate(b).getTime()) / 86_400_000,
+  );
+}

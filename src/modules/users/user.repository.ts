@@ -84,24 +84,6 @@ export async function findUserByPhone(tenantId: string, phone: string, dbOrTx: D
   return rows[0];
 }
 
-export async function findUserByEmailGlobal(email: string, dbOrTx: DBOrTx = db) {
-  const rows = await dbOrTx
-    .select()
-    .from(users)
-    .where(and(eq(users.email, email), isNull(users.deletedAt)))
-    .limit(1);
-  return rows[0];
-}
-
-export async function findUserByPhoneGlobal(phone: string, dbOrTx: DBOrTx = db) {
-  const rows = await dbOrTx
-    .select()
-    .from(users)
-    .where(and(eq(users.phone, phone), isNull(users.deletedAt)))
-    .limit(1);
-  return rows[0];
-}
-
 export async function createUser(
   data: typeof users.$inferInsert,
   dbOrTx: DBOrTx = db,

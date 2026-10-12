@@ -7,6 +7,7 @@ import {
 import { getCache } from '../../shared/cache/index.js';
 import { AppError } from '../../shared/middleware/errorHandler.js';
 import { deleteRole, findByRole, listRoles, upsertRole } from './permission.repository.js';
+import type { DeliveryRole } from '../../shared/db/schema/enums.js';
 
 const MANAGED_ROLES = ['agent', 'delivery', 'delivery_partner'] as const;
 
@@ -16,9 +17,9 @@ function permsCacheKey(tenantId: string, role: string): string {
 
 export async function getMyPermissions(role: string, tenantId: string): Promise<string[]> {
   if (role === 'admin') return ['*'];
-  if (!DELIVERY_ROLES.has(role)) return [];
-  const row = await findByRole(tenantId, role);
-  return row?.permissions ?? DEFAULT_ROLE_PERMISSIONS[role] ?? [];
+  if (!DELIVERY_ROLES.has(role as DeliveryRole)) return [];
+  const row = await findByRole(tenantId, role as DeliveryRole);
+  return row?.permissions ?? DEFAULT_ROLE_PERMISSIONS[role as DeliveryRole] ?? [];
 }
 
 export function getRegistry() {
@@ -53,7 +54,7 @@ export async function getRoles(tenantId: string) {
 
 export async function updateRole(
   tenantId: string,
-  role: string,
+  role: DeliveryRole,
   permissions: string[],
   updatedById?: string | null,
 ) {
@@ -66,7 +67,7 @@ export async function updateRole(
   return { role: row.role, permissions: row.permissions };
 }
 
-export async function resetRole(tenantId: string, role: string) {
+export async function resetRole(tenantId: string, role: DeliveryRole) {
   await deleteRole(tenantId, role);
   await getCache().del(permsCacheKey(tenantId, role));
   return { role, permissions: DEFAULT_ROLE_PERMISSIONS[role] ?? [] };

@@ -1,5 +1,6 @@
 import { db } from '../../shared/db/client.js';
 import { withTransaction } from '../../shared/db/transaction.js';
+import { getCache } from '../../shared/cache/index.js';
 import { AppError } from '../../shared/middleware/errorHandler.js';
 import { sseManager } from '../../shared/realtime/sseManager.js';
 import { logger } from '../../shared/utils/logger.js';
@@ -60,7 +61,43 @@ function joinAddress(parts: Array<string | null | undefined>): string | null {
 
 // ---------- generation ----------
 
+// Distributed lock TTL for manifest generation (seconds). Prevents duplicate
+// entries from concurrent cron re-runs for the same tenant/date/slot.
+const MANIFEST_GEN_LOCK_TTL_SECONDS = 5;
+
 export async function generateManifestsForDate(
+  tenantId: string,
+  date: string,
+  slot: ManifestSlot,
+  dbOrTx: DBOrTx = db,
+  outerTx?: DrizzleTx,
+): Promise<GenerateResult> {
+  // Best-effort distributed lock: a concurrent generation for the same key
+  // skips instead of double-inserting. Entry insertion below is additionally
+  // refresh-safe (missing-refs only), so a lock expiry mid-run still cannot
+  // duplicate entries.
+  const lockKey = `manifest:${tenantId}:${date}:${slot}`;
+  let lockAcquired = false;
+  try {
+    lockAcquired = await getCache().setIfAbsent(lockKey, '1', MANIFEST_GEN_LOCK_TTL_SECONDS);
+  } catch (err) {
+    logger.warn({ err, lockKey }, 'Manifest generation lock unavailable — proceeding without lock');
+    lockAcquired = true;
+  }
+  if (!lockAcquired) {
+    logger.info({ tenantId, date, slot }, 'Manifest generation already in progress — skipping');
+    return { manifests: [], skippedAreas: [], unassigned: 0, skipped: true, reason: 'locked' };
+  }
+  try {
+    return await generateManifestsForDateInner(tenantId, date, slot, dbOrTx, outerTx);
+  } finally {
+    if (lockAcquired) {
+      await getCache().del(lockKey).catch(() => undefined);
+    }
+  }
+}
+
+async function generateManifestsForDateInner(
   tenantId: string,
   date: string,
   slot: ManifestSlot,
@@ -223,12 +260,13 @@ export async function generateManifests(
   const morning = await generateManifestsForDate(tenantId, date, 'morning', dbOrTx, outerTx);
   const evening = await generateManifestsForDate(tenantId, date, 'evening', dbOrTx, outerTx);
   const skipped = morning.skipped && evening.skipped;
+  const reason = skipped ? (morning.reason ?? evening.reason ?? 'holiday') : undefined;
   return {
     manifests: [...morning.manifests, ...evening.manifests],
     skippedAreas: [...morning.skippedAreas, ...evening.skippedAreas],
     unassigned: morning.unassigned + evening.unassigned,
     skipped,
-    ...(skipped ? { reason: 'holiday' } : {}),
+    ...(reason ? { reason } : {}),
   };
 }
 
@@ -259,6 +297,20 @@ export async function updateManifestEntry(
     }
 
     const reason = data.failureReason ?? data.reason ?? null;
+    // Quantity bounds for partial/extra outcomes, checked before any ledger
+    // write: partial must be strictly less than scheduled; extra has a 3x
+    // ceiling over scheduled.
+    if ((data.status === 'partial' || data.status === 'extra') && data.actualQuantity !== undefined) {
+      const scheduledQty = Number(entry.quantity);
+      if (Number.isFinite(scheduledQty) && scheduledQty > 0) {
+        if (data.status === 'partial' && data.actualQuantity >= scheduledQty) {
+          throw new AppError('Partial delivery quantity must be less than scheduled', 422);
+        }
+        if (data.status === 'extra' && data.actualQuantity > scheduledQty * 3) {
+          throw new AppError('Extra delivery quantity exceeds allowed ceiling', 422);
+        }
+      }
+    }
     // Manifest entries only store delivered|failed|skipped; partial/extra
     // outcomes are stored as delivered on the entry but recorded in full on
     // the underlying subscription (quantity-correct billing).

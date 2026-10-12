@@ -5,6 +5,7 @@ import type { DBOrTx, DrizzleTx } from '../../shared/types/index.js';
 import { istToday, toDateOnlyString } from '../../shared/utils/dateUtils.js';
 import { buildMeta, parsePagination } from '../../shared/utils/pagination.js';
 import { transactionService, type CreateTxnParams } from '../transactions/transaction.service.js';
+import { updateTransaction } from '../transactions/transaction.repository.js';
 import { findPaymentById, listCustomerPassbook } from './payment.repository.js';
 import type {
   DeletePaymentInput,
@@ -133,6 +134,34 @@ export async function deletePayment(
   const result = tx ? await run(tx) : await withTransaction(run);
   if (syncUserId) fireInvoiceSync(tenantId, syncUserId, syncDate);
   return result;
+}
+
+/**
+ * Manually confirm a UPI/bank-transfer payment (admin only). Sets the
+ * `reconciled` flag on the active payment transaction.
+ */
+export async function reconcilePayment(
+  paymentTxnId: string,
+  tenantId: string,
+  adminId: string,
+  tx?: DrizzleTx,
+) {
+  const run = async (t: DrizzleTx) => {
+    const original = await findPaymentById(paymentTxnId, tenantId, t);
+    if (!original) throw new AppError('Payment transaction not found', 404);
+    if (original.status !== 'active') throw new AppError('Only active payments can be reconciled', 400);
+    if (original.reconciled) return original;
+    const updated = await updateTransaction(
+      paymentTxnId,
+      tenantId,
+      { reconciled: true, modifiedById: adminId, modifiedAt: new Date() },
+      t,
+    );
+    if (!updated) throw new AppError('Payment transaction not found', 404);
+    return updated;
+  };
+  if (tx) return run(tx);
+  return withTransaction(run);
 }
 
 export async function getPassbook(

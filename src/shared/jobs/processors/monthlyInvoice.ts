@@ -1,7 +1,7 @@
 import { eq, sql } from 'drizzle-orm';
 import { db } from '../../db/client.js';
 import { tenants } from '../../db/schema/index.js';
-import { istToday, toDateOnlyString } from '../../utils/dateUtils.js';
+import { istToday, subMonths } from '../../utils/dateUtils.js';
 import { logger } from '../../utils/logger.js';
 import {
   generateBulkInvoices,
@@ -19,16 +19,11 @@ async function listActiveTenantIds(): Promise<string[]> {
 async function processMonthlyTenant(tenantId: string): Promise<void> {
   await db.execute(sql`SELECT set_config('app.tenant_id', ${tenantId}, false)`);
   try {
-    // istToday() is already an IST-midnight date; derive prior month in IST.
-    const todayStr = toDateOnlyString(istToday());
-    const thisYear = Number(todayStr.slice(0, 4));
-    const thisMonth = Number(todayStr.slice(5, 7));
-    let month = thisMonth - 1;
-    let year = thisYear;
-    if (month === 0) {
-      month = 12;
-      year -= 1;
-    }
+    // istToday() is already an IST-midnight date; derive the prior month in
+    // IST with calendar-aware arithmetic (handles January → December rollover).
+    const lastMonth = subMonths(istToday(), 1);
+    const month = lastMonth.getMonth() + 1; // 1-12
+    const year = lastMonth.getFullYear();
 
     // Fail loudly (job retry + alerting) instead of warn-and-skip billing.
     await markOverdueInvoices(tenantId).catch((err) => {

@@ -50,4 +50,11 @@ export class MemoryAdapter implements CacheAdapter {
     cur.count += 1;
     return cur.count;
   }
+
+  async setIfAbsent(key: string, value: unknown, ttlSeconds: number): Promise<boolean> {
+    const existing = await this.get(key);
+    if (existing !== null) return false;
+    await this.set(key, value, ttlSeconds);
+    return true;
+  }
 }

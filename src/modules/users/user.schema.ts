@@ -3,11 +3,17 @@ import { z } from 'zod';
 const phoneSchema = z.string().regex(/^[6-9]\d{9}$/);
 const roleEnum = z.enum(['customer', 'admin', 'delivery', 'delivery_partner', 'agent', 'supplier']);
 
+const passwordSchema = z
+  .string()
+  .min(8, 'Password must be at least 8 characters')
+  .regex(/[A-Z]/, 'Password must contain an uppercase letter')
+  .regex(/[0-9]/, 'Must contain a number');
+
 export const customerRegisterSchema = z.object({
   name: z.string().min(1),
   phone: phoneSchema,
   email: z.string().email().optional(),
-  password: z.string().min(6),
+  password: passwordSchema,
   tenantSlug: z.string().optional(),
 });
 
@@ -16,7 +22,7 @@ export type CustomerRegisterInput = z.infer<typeof customerRegisterSchema>;
 export const loginSchema = z.object({
   emailOrPhone: z.string().min(1),
   password: z.string().min(1),
-  tenantSlug: z.string().optional(),
+  tenantSlug: z.string().min(1, 'tenantSlug is required'),
 });
 
 export type LoginInput = z.infer<typeof loginSchema>;
@@ -34,7 +40,7 @@ export const adminCreateUserSchema = z.object({
   name: z.string().min(1),
   phone: phoneSchema,
   email: z.string().email().optional(),
-  password: z.string().min(6),
+  password: passwordSchema,
   role: roleEnum,
   assignedAreaId: z.string().uuid().optional(),
   deliverySequence: z.number().int().optional(),
@@ -46,7 +52,7 @@ export const adminUpdateUserSchema = z.object({
   name: z.string().min(1).optional(),
   phone: phoneSchema.optional(),
   email: z.string().email().optional().nullable(),
-  password: z.string().min(6).optional(),
+  password: passwordSchema.optional(),
   role: roleEnum.optional(),
   isActive: z.boolean().optional(),
   assignedAreaId: z.string().uuid().optional().nullable(),

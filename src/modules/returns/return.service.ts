@@ -5,6 +5,7 @@ import type { DBOrTx, DrizzleTx } from '../../shared/types/index.js';
 import { buildMeta, parsePagination } from '../../shared/utils/pagination.js';
 import { istToday, toDateOnlyString } from '../../shared/utils/dateUtils.js';
 import { transactionService } from '../transactions/transaction.service.js';
+import { DEFAULT_RETURN_WINDOW_MS, getTenantSettings } from '../tenants/tenant.settings.js';
 import type { CreateReturnInput, ReturnListQuery, UpdateReturnStatusInput } from './return.schema.js';
 import {
   findActiveReturnForOrder,
@@ -19,7 +20,8 @@ import {
   updateReturnRow,
 } from './return.repository.js';
 
-const RETURN_WINDOW_MS = 24 * 60 * 60 * 1000;
+// Fallback default; per-tenant override lives in tenants.settings.returnWindowMs.
+const RETURN_WINDOW_MS = DEFAULT_RETURN_WINDOW_MS;
 
 function fireInvoiceSync(tenantId: string, userId: string, effectiveDate?: string): void {
   try {
@@ -49,7 +51,16 @@ export async function requestReturn(tenantId: string, userId: string, input: Cre
     if (order.orderStatus !== 'delivered' || !order.deliveredAt) {
       throw new AppError('Only delivered orders can be returned', 409);
     }
-    if (Date.now() - new Date(order.deliveredAt).getTime() > RETURN_WINDOW_MS) {
+    // Normalize both sides to UTC epoch millis before comparing so an
+    // IST-offset deliveredAt string is measured on the same clock as Date.now().
+    // deliveredAt is stored as timestamptz (UTC) — see schema default.
+    const deliveredUtc = new Date(order.deliveredAt).getTime();
+    if (Number.isNaN(deliveredUtc)) {
+      throw new AppError('Order delivery timestamp is invalid', 500);
+    }
+    const { returnWindowMs } = await getTenantSettings(tenantId, t);
+    const windowMs = returnWindowMs || RETURN_WINDOW_MS;
+    if (Date.now() - deliveredUtc > windowMs) {
       throw new AppError('Return window expired (24 hours after delivery)', 409);
     }
     const existing = await findActiveReturnForOrder(tenantId, input.orderId, t);
@@ -123,6 +134,19 @@ export async function updateStatus(
     if (!ret) throw new AppError('Return not found', 404);
     const order = await findOrderById(tenantId, ret.orderId, t);
     if (!order) throw new AppError('Order not found', 404);
+
+    // Rejecting a return voids any previously created return_refund so the
+    // customer ledger never keeps money for a denied return.
+    if (status === 'rejected') {
+      await transactionService.voidTransactionByRef(
+        returnId,
+        'return',
+        tenantId,
+        'Return rejected — refund voided',
+        adminId,
+        t,
+      );
+    }
 
     let refundTransaction: unknown = null;
     if (needsRefund && refundAmount !== undefined) {
