@@ -18,6 +18,10 @@ import {
 } from './product.service.js';
 
 async function resolveTenant(c: Context): Promise<string> {
+  // Authenticated requests (e.g. admin portal) can skip slug resolution entirely.
+  const user = c.get('user') as AuthUser | undefined;
+  if (user?.tenantId) return user.tenantId;
+
   const query = c.get('query') as ProductListQuery | undefined;
   const headerSlug = c.req.header('x-tenant-slug');
   const rawSlug = new URL(c.req.url).searchParams.get('slug');

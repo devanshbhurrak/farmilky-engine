@@ -34,6 +34,11 @@ export function getRegistry() {
   };
 }
 
+export async function getRolePermissions(tenantId: string, role: DeliveryRole): Promise<string[]> {
+  const row = await findByRole(tenantId, role);
+  return row?.permissions ?? DEFAULT_ROLE_PERMISSIONS[role] ?? [];
+}
+
 export async function getRoles(tenantId: string) {
   const rows = await listRoles(tenantId);
   const byRole = new Map(rows.map((r) => [r.role, r]));

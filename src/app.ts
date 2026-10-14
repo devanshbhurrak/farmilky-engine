@@ -128,31 +128,34 @@ export async function buildApp() {
   await registerRecurringJobs(queue).catch((err) => logger.error({ err }, 'Failed to register recurring jobs'));
   queue.startWorkers();
 
-  // Idempotent: generate today's manifests for all active tenants
-  try {
-    const activeTenants = await db.select({ id: tenants.id }).from(tenants).where(eq(tenants.isActive, true));
-    const today = toDateOnlyString(istToday());
-    for (const t of activeTenants) {
-      try {
-        await withTransaction(async (tx) => {
-          await tx.execute(sql`SET LOCAL app.tenant_id = ${t.id}`);
-          await generateManifestsForDate(t.id, today, 'morning', tx, tx);
-        });
-      } catch (err) {
-        logger.error({ err, tenantId: t.id }, 'Startup morning manifest generation failed');
+  // Idempotent: generate today's manifests for all active tenants.
+  // Runs in the background so the server starts listening immediately.
+  void (async () => {
+    try {
+      const activeTenants = await db.select({ id: tenants.id }).from(tenants).where(eq(tenants.isActive, true));
+      const today = toDateOnlyString(istToday());
+      for (const t of activeTenants) {
+        try {
+          await withTransaction(async (tx) => {
+            await tx.execute(sql`SELECT set_config('app.tenant_id', ${t.id}, true)`);
+            await generateManifestsForDate(t.id, today, 'morning', tx, tx);
+          });
+        } catch (err) {
+          logger.error({ err, tenantId: t.id }, 'Startup morning manifest generation failed');
+        }
+        try {
+          await withTransaction(async (tx) => {
+            await tx.execute(sql`SELECT set_config('app.tenant_id', ${t.id}, true)`);
+            await generateManifestsForDate(t.id, today, 'evening', tx, tx);
+          });
+        } catch (err) {
+          logger.error({ err, tenantId: t.id }, 'Startup evening manifest generation failed');
+        }
       }
-      try {
-        await withTransaction(async (tx) => {
-          await tx.execute(sql`SET LOCAL app.tenant_id = ${t.id}`);
-          await generateManifestsForDate(t.id, today, 'evening', tx, tx);
-        });
-      } catch (err) {
-        logger.error({ err, tenantId: t.id }, 'Startup evening manifest generation failed');
-      }
+    } catch (err) {
+      logger.error({ err }, 'Startup manifest generation failed');
     }
-  } catch (err) {
-    logger.error({ err }, 'Startup manifest generation failed');
-  }
+  })();
 
   return createApp();
 }

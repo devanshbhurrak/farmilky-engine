@@ -9,22 +9,30 @@ export const recordPaymentSchema = z.object({
   amount: z.number().positive(),
   paymentMethod: paymentMethodSchema.default('cash'),
   paymentRef: z.string().optional(),
+  // 'transactionId' is the field name used by frontend forms — accepted as alias for paymentRef
+  transactionId: z.string().optional(),
   receivedDate: dateString.optional(),
+  // 'date' is accepted as alias for receivedDate from frontend forms that use that field name
+  date: dateString.optional(),
   description: z.string().optional(),
   notes: z.string().optional(),
 });
 
 export const updatePaymentSchema = z.object({
-  void_reason: z.string().min(1, 'void_reason is required'),
+  // defaults to 'Admin action' so frontend forms that omit it still succeed
+  void_reason: z.string().min(1).default('Admin action'),
   amount: z.number().positive().optional(),
   description: z.string().min(1).optional(),
   notes: z.string().optional(),
   paymentMethod: paymentMethodSchema.optional(),
   receivedDate: dateString.optional(),
+  // 'date' alias accepted from frontend
+  date: dateString.optional(),
 });
 
 export const deletePaymentSchema = z.object({
-  void_reason: z.string().min(1, 'void_reason is required'),
+  // defaults to 'Admin action' so frontend forms that omit it still succeed
+  void_reason: z.string().min(1).default('Admin action'),
 });
 
 export const passbookQuerySchema = z.object({

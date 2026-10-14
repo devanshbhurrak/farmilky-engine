@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { adminOnly } from '../../shared/middleware/adminOnly.js';
 import { auth } from '../../shared/middleware/auth.js';
+import { optionalAuth } from '../../shared/middleware/optionalAuth.js';
 import { tenant } from '../../shared/middleware/tenant.js';
 import { validateBody, validateParams, validateQuery } from '../../shared/middleware/validate.js';
 import type { HonoEnv } from '../../shared/types/index.js';
@@ -20,8 +21,8 @@ import {
 
 export const productRoutes = new Hono<HonoEnv>();
 
-productRoutes.get('/', validateQuery(productListQuerySchema), listProductsController);
-productRoutes.get('/:id', validateParams(productIdParamSchema), getProductController);
+productRoutes.get('/', optionalAuth, validateQuery(productListQuerySchema), listProductsController);
+productRoutes.get('/:id', optionalAuth, validateParams(productIdParamSchema), getProductController);
 
 productRoutes.post('/', auth, tenant, adminOnly, validateBody(createProductSchema), createProductController);
 productRoutes.put(

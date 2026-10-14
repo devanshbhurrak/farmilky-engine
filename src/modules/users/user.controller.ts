@@ -11,9 +11,11 @@ import type {
   DeliveryConfigInput,
   LoginInput,
   UpdateProfileInput,
+  UserAdjustmentInput,
   UserIdParam,
 } from './user.schema.js';
 import { AuthService, UserService } from './user.service.js';
+import { transactionService } from '../transactions/transaction.service.js';
 
 function baseCookieOptions(maxAge: number) {
   return {
@@ -117,4 +119,26 @@ export async function updateDeliveryConfig(c: Context<HonoEnv>) {
   const body = c.get('body') as DeliveryConfigInput;
   const updated = await UserService.updateDeliveryConfig(user.tenantId, params.id, body);
   return ok(c, updated);
+}
+
+export async function createUserAdjustment(c: Context<HonoEnv>) {
+  const user = c.get('user') as AuthUser;
+  const params = c.get('params') as UserIdParam;
+  const body = c.get('body') as UserAdjustmentInput;
+
+  const entryType = body.type === 'credit_adjustment' ? 'credit' : 'debit';
+  const txn = await transactionService.createTransaction({
+    tenantId: user.tenantId,
+    partyType: 'customer',
+    partyId: params.id,
+    txnType: body.type,
+    entryType,
+    amount: body.amount,
+    effectiveDate: body.date,
+    description: `${body.type.replace('_', ' ').toLowerCase()}`,
+    notes: body.notes ?? null,
+    createdById: user.id,
+  });
+
+  return created(c, txn);
 }

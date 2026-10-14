@@ -18,27 +18,34 @@ export const createExpenseSchema = z.object({
   amount: z.number().positive(),
   category: expenseCategorySchema,
   effectiveDate: dateString.optional(),
+  // 'date' is the field name used by the frontend form — accepted as alias for effectiveDate
+  date: dateString.optional(),
   description: z.string().min(1),
   notes: z.string().optional(),
   paymentMethod: z.enum(['cash', 'upi', 'bank_transfer', 'card', 'online', 'COD']).optional(),
 });
 
 export const updateExpenseSchema = z.object({
-  void_reason: z.string().min(1, 'void_reason is required'),
+  // void_reason defaults to 'Admin action' so frontend forms that omit it still succeed
+  void_reason: z.string().min(1).default('Admin action'),
   amount: z.number().positive().optional(),
   description: z.string().min(1).optional(),
   notes: z.string().optional(),
   category: expenseCategorySchema.optional(),
   effectiveDate: dateString.optional(),
+  // 'date' alias accepted from frontend
+  date: dateString.optional(),
 });
 
 export const deleteExpenseSchema = z.object({
-  void_reason: z.string().min(1, 'void_reason is required'),
+  // void_reason defaults to 'Admin action' so frontend forms that omit it still succeed
+  void_reason: z.string().min(1).default('Admin action'),
 });
 
 export const expenseQuerySchema = z.object({
   page: z.string().optional(),
   limit: z.string().optional(),
+  search: z.string().optional(),
   category: expenseCategorySchema.optional(),
   startDate: dateString.optional(),
   endDate: dateString.optional(),
@@ -47,6 +54,8 @@ export const expenseQuerySchema = z.object({
 export const expenseSummaryQuerySchema = z.object({
   startDate: dateString.optional(),
   endDate: dateString.optional(),
+  category: expenseCategorySchema.optional(),
+  search: z.string().optional(),
 });
 
 export const expenseIdParamSchema = z.object({

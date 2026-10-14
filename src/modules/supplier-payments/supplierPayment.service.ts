@@ -14,6 +14,7 @@ import {
 } from './supplierPayment.repository.js';
 import type {
   CollectionTotalQuery,
+  ListSupplierPaymentsQuery,
   OutstandingQuery,
   RecordSupplierPaymentInput,
   SupplierHistoryQuery,
@@ -181,4 +182,14 @@ export async function getSupplierPaymentHistory(
   const { page, limit, offset } = parsePagination(query);
   const { rows, total } = await listSupplierHistoryTxns(tenantId, supplierId, { limit, offset }, dbOrTx);
   return { rows, meta: buildMeta(total, page, limit), supplier };
+}
+
+export async function listSupplierPayments(
+  tenantId: string,
+  query: ListSupplierPaymentsQuery,
+  dbOrTx: DBOrTx = db,
+) {
+  const { page, limit, offset } = parsePagination(query);
+  const { rows, total } = await listSupplierHistoryTxns(tenantId, query.supplierId, { limit, offset }, dbOrTx);
+  return { rows, meta: buildMeta(total, page, limit) };
 }

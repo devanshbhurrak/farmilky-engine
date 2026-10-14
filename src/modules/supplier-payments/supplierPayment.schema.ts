@@ -39,8 +39,17 @@ export const supplierHistoryParamSchema = z.object({
   supplierId: z.string().uuid(),
 });
 
+export const listSupplierPaymentsQuerySchema = z.object({
+  page: z.string().optional(),
+  limit: z.string().optional(),
+  supplierId: z.string().uuid().optional(),
+  fromDate: dateString.optional(),
+  toDate: dateString.optional(),
+});
+
 export type RecordSupplierPaymentInput = z.infer<typeof recordSupplierPaymentSchema>;
 export type OutstandingQuery = z.infer<typeof outstandingQuerySchema>;
 export type CollectionTotalQuery = z.infer<typeof collectionTotalQuerySchema>;
 export type SupplierHistoryQuery = z.infer<typeof supplierHistoryQuerySchema>;
 export type SupplierHistoryParam = z.infer<typeof supplierHistoryParamSchema>;
+export type ListSupplierPaymentsQuery = z.infer<typeof listSupplierPaymentsQuerySchema>;

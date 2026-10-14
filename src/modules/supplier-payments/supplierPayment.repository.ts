@@ -26,14 +26,14 @@ export async function findSettlementsForTxn(settledTxnId: string, dbOrTx: DBOrTx
 
 export async function listSupplierHistoryTxns(
   tenantId: string,
-  supplierId: string,
+  supplierId: string | undefined,
   pagination: { limit: number; offset: number },
   dbOrTx: DBOrTx = db,
 ) {
   const conds = [
     eq(transactions.tenantId, tenantId),
     eq(transactions.partyType, 'supplier'),
-    eq(transactions.partyId, supplierId),
+    ...(supplierId ? [eq(transactions.partyId, supplierId)] : []),
     eq(transactions.status, 'active'),
     inArray(transactions.txnType, ['supplier_payment', 'supplier_adjustment']),
   ];

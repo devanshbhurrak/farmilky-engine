@@ -139,6 +139,13 @@ export const deliveryBoardQuerySchema = z.object({
   slot: deliverySlotSchema.optional(),
 });
 
+export const historyQuerySchema = z.object({
+  month: z.string().optional(),
+  year: z.string().optional(),
+  page: z.string().optional(),
+  limit: z.string().optional(),
+});
+
 export type CreateSubscriptionInput = z.infer<typeof createSubscriptionSchema>;
 export type AdminCreateSubscriptionInput = z.infer<typeof adminCreateSubscriptionSchema>;
 export type UpdateSubscriptionInput = z.infer<typeof updateSubscriptionSchema>;
@@ -156,3 +163,4 @@ export type DeliveryEntryParam = z.infer<typeof deliveryEntryParamSchema>;
 export type SubscriptionUserParam = z.infer<typeof subscriptionUserParamSchema>;
 export type AdminSubscriptionListQuery = z.infer<typeof adminSubscriptionListQuerySchema>;
 export type DeliveryBoardQuery = z.infer<typeof deliveryBoardQuerySchema>;
+export type HistoryQuery = z.infer<typeof historyQuerySchema>;

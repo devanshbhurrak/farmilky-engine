@@ -32,7 +32,7 @@ export async function createExpense(
         entryType: 'debit',
         txnCategory: input.category,
         amount: input.amount,
-        effectiveDate: input.effectiveDate ?? toDateOnlyString(istToday()),
+        effectiveDate: input.effectiveDate ?? input.date ?? toDateOnlyString(istToday()),
         paymentMethod: input.paymentMethod ?? null,
         description: input.description,
         notes: input.notes ?? null,
@@ -57,7 +57,9 @@ export async function updateExpense(
     if (rest.amount !== undefined) patch.amount = rest.amount;
     if (rest.description !== undefined) patch.description = rest.description;
     if (rest.notes !== undefined) patch.notes = rest.notes;
-    if (rest.effectiveDate !== undefined) patch.effectiveDate = rest.effectiveDate;
+    if (rest.effectiveDate !== undefined || rest.date !== undefined) {
+      patch.effectiveDate = rest.effectiveDate ?? rest.date;
+    }
     if (category !== undefined) patch.txnCategory = category;
     return transactionService.editTransaction(expenseTxnId, tenantId, patch, void_reason, adminId, t);
   };
@@ -85,6 +87,7 @@ export async function listExpenses(tenantId: string, query: ExpenseQuery, dbOrTx
     {
       limit,
       offset,
+      search: query.search,
       category: query.category,
       startDate: query.startDate,
       endDate: query.endDate,
@@ -97,7 +100,7 @@ export async function listExpenses(tenantId: string, query: ExpenseQuery, dbOrTx
 export async function expenseSummary(tenantId: string, query: ExpenseSummaryQuery, dbOrTx: DBOrTx = db) {
   const breakdown = await summarizeExpenseRows(
     tenantId,
-    { startDate: query.startDate, endDate: query.endDate },
+    { startDate: query.startDate, endDate: query.endDate, category: query.category, search: query.search },
     dbOrTx,
   );
   const total = round2(breakdown.reduce((sum, r) => sum + r.total, 0));

@@ -21,6 +21,7 @@ import {
   deleteDeliveryEntryController,
   deliveryBoardController,
   getSubscriptionController,
+  getSubscriptionHistoryController,
   listMySubscriptionsController,
   markDeliveredController,
   pauseSubscriptionController,
@@ -43,6 +44,7 @@ import {
   createSubscriptionSchema,
   deliveryBoardQuerySchema,
   deliveryEntryParamSchema,
+  historyQuerySchema,
   pauseSubscriptionSchema,
   recordDeliveryOutcomeSchema,
   scheduleChangeSchema,
@@ -90,6 +92,23 @@ subscriptionRoutes.get(
   deliveryOrAdmin,
   validateQuery(deliveryBoardQuerySchema),
   deliveryBoardController,
+);
+subscriptionRoutes.get(
+  '/admin/:id',
+  auth,
+  tenant,
+  adminOnly,
+  validateParams(subscriptionIdParamSchema),
+  getSubscriptionController,
+);
+subscriptionRoutes.get(
+  '/admin/:id/history',
+  auth,
+  tenant,
+  adminOnly,
+  validateParams(subscriptionIdParamSchema),
+  validateQuery(historyQuerySchema),
+  getSubscriptionHistoryController,
 );
 subscriptionRoutes.get(
   '/admin/user/:userId/active',

@@ -3,6 +3,7 @@ import type { AuthUser } from '../../shared/types/index.js';
 import { created, ok, paginated } from '../../shared/utils/response.js';
 import type {
   CollectionTotalQuery,
+  ListSupplierPaymentsQuery,
   OutstandingQuery,
   RecordSupplierPaymentInput,
   SupplierHistoryParam,
@@ -12,6 +13,7 @@ import {
   getCollectionTotal,
   getOutstanding,
   getSupplierPaymentHistory,
+  listSupplierPayments,
   recordSupplierPayment,
 } from './supplierPayment.service.js';
 
@@ -42,4 +44,11 @@ export const supplierPaymentHistoryController = async (c: Context) => {
   const query = (c.get('query') ?? {}) as SupplierHistoryQuery;
   const { rows, meta, supplier } = await getSupplierPaymentHistory(user.tenantId, params.supplierId, query);
   return paginated(c, { payments: rows, supplier }, meta);
+};
+
+export const listSupplierPaymentsController = async (c: Context) => {
+  const user = c.get('user') as AuthUser;
+  const query = (c.get('query') ?? {}) as ListSupplierPaymentsQuery;
+  const { rows, meta } = await listSupplierPayments(user.tenantId, query);
+  return paginated(c, rows, meta);
 };

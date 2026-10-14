@@ -6,6 +6,7 @@ import { tenant } from '../../shared/middleware/tenant.js';
 import { validateBody, validateParams, validateQuery } from '../../shared/middleware/validate.js';
 import {
   createAdminUser,
+  createUserAdjustment,
   getAdminUser,
   getProfile,
   listAdminUsers,
@@ -26,6 +27,7 @@ import {
   loginSchema,
   refreshBodySchema,
   updateProfileSchema,
+  userAdjustmentSchema,
   userIdParamSchema,
 } from './user.schema.js';
 
@@ -66,4 +68,13 @@ userRoutes.put(
   validateParams(userIdParamSchema),
   validateBody(deliveryConfigSchema),
   updateDeliveryConfig,
+);
+userRoutes.post(
+  '/admin/:id/adjustments',
+  auth,
+  tenant,
+  adminOnly,
+  validateParams(userIdParamSchema),
+  validateBody(userAdjustmentSchema),
+  createUserAdjustment,
 );

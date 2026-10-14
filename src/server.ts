@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { serve } from '@hono/node-server';
 import { buildApp } from './app.js';
 import { env } from './shared/config/env.js';

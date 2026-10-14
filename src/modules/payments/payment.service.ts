@@ -44,7 +44,7 @@ export async function recordPayment(
   let syncUserId: string | null = null;
   let syncDate: string | undefined;
   const run = async (t: DrizzleTx) => {
-    const effectiveDate = input.receivedDate ?? toDateOnlyString(istToday());
+    const effectiveDate = input.receivedDate ?? input.date ?? toDateOnlyString(istToday());
     const txn = await transactionService.createTransaction(
       {
         tenantId,
@@ -56,7 +56,7 @@ export async function recordPayment(
         effectiveDate,
         receivedDate: effectiveDate,
         paymentMethod: input.paymentMethod ?? 'cash',
-        paymentRef: input.paymentRef ?? null,
+        paymentRef: input.paymentRef ?? input.transactionId ?? null,
         description: input.description ?? 'Payment received',
         notes: input.notes ?? null,
         createdById: adminId,
@@ -87,9 +87,10 @@ export async function updatePayment(
     if (input.description !== undefined) patch.description = input.description;
     if (input.notes !== undefined) patch.notes = input.notes;
     if (input.paymentMethod !== undefined) patch.paymentMethod = input.paymentMethod;
-    if (input.receivedDate !== undefined) {
-      patch.effectiveDate = input.receivedDate;
-      patch.receivedDate = input.receivedDate;
+    const resolvedDate = input.receivedDate ?? input.date;
+    if (resolvedDate !== undefined) {
+      patch.effectiveDate = resolvedDate;
+      patch.receivedDate = resolvedDate;
     }
     const updated = await transactionService.editTransaction(
       paymentTxnId,

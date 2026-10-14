@@ -1,5 +1,6 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { sql } from 'drizzle-orm';
 import { db } from '../../shared/db/client.js';
 import { withTransaction } from '../../shared/db/transaction.js';
 import { env } from '../../shared/config/env.js';
@@ -67,6 +68,12 @@ function resolveTenantSlug(bodySlug?: string, headerSlug?: string): string | und
   return bodySlug ?? headerSlug;
 }
 
+// Sets the Postgres session variable that RLS policies read.
+// Must be called inside a transaction (is_local=true → auto-resets on commit/rollback).
+async function setRlsTenantContext(tenantId: string, dbOrTx: DBOrTx): Promise<void> {
+  await dbOrTx.execute(sql`SELECT set_config('app.tenant_id', ${tenantId}, true)`);
+}
+
 export class AuthService {
   static async register(
     input: CustomerRegisterInput,
@@ -78,6 +85,7 @@ export class AuthService {
       if (!slug) throw new AppError('tenantSlug is required', 400);
       const tenant = await findTenantBySlug(slug, dbOrTx);
       if (!tenant) throw new AppError('Unknown tenant', 400);
+      await setRlsTenantContext(tenant.id, dbOrTx);
 
       const existingPhone = await findUserByPhone(tenant.id, input.phone, dbOrTx);
       if (existingPhone) throw new AppError('Phone already registered', 409);
@@ -116,6 +124,7 @@ export class AuthService {
       const found = await findTenantBySlug(slug, dbOrTx);
       if (!found) throw new AppError('Unknown tenant', 400);
       const tenant: { id: string } = found;
+      await setRlsTenantContext(tenant.id, dbOrTx);
 
       let user:
         | Awaited<ReturnType<typeof findUserByEmail>>
@@ -142,6 +151,7 @@ export class AuthService {
       const hash = sha256(rawToken);
       const stored = await findValidRefreshTokenByHash(hash, dbOrTx);
       if (!stored) throw new AppError('Invalid refresh token', 401);
+      await setRlsTenantContext(stored.tenantId, dbOrTx);
 
       const user = await findUserById(stored.userId, stored.tenantId, dbOrTx);
       if (!user || user.isActive === false) throw new AppError('Invalid refresh token', 401);

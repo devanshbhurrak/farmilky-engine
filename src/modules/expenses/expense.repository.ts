@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, ilike, lte, or, sql } from 'drizzle-orm';
 import { db } from '../../shared/db/client.js';
 import type { DBOrTx } from '../../shared/types/index.js';
 import { transactions } from '../../shared/db/schema/index.js';
@@ -6,12 +6,13 @@ import { transactions } from '../../shared/db/schema/index.js';
 export interface ExpenseListOpts {
   limit: number;
   offset: number;
+  search?: string;
   category?: string;
   startDate?: string;
   endDate?: string;
 }
 
-function expenseConditions(tenantId: string, opts: { category?: string; startDate?: string; endDate?: string }) {
+function expenseConditions(tenantId: string, opts: { search?: string; category?: string; startDate?: string; endDate?: string }) {
   const conds = [
     eq(transactions.tenantId, tenantId),
     eq(transactions.partyType, 'business'),
@@ -21,6 +22,10 @@ function expenseConditions(tenantId: string, opts: { category?: string; startDat
   if (opts.category) conds.push(eq(transactions.txnCategory, opts.category));
   if (opts.startDate) conds.push(gte(transactions.effectiveDate, opts.startDate));
   if (opts.endDate) conds.push(lte(transactions.effectiveDate, opts.endDate));
+  if (opts.search) {
+    const like = `%${opts.search}%`;
+    conds.push(or(ilike(transactions.description, like), ilike(transactions.notes, like))!);
+  }
   return conds;
 }
 
@@ -42,7 +47,7 @@ export async function listExpenses(tenantId: string, opts: ExpenseListOpts, dbOr
 
 export async function summarizeExpenses(
   tenantId: string,
-  opts: { startDate?: string; endDate?: string },
+  opts: { startDate?: string; endDate?: string; category?: string; search?: string },
   dbOrTx: DBOrTx = db,
 ) {
   const conds = expenseConditions(tenantId, opts);

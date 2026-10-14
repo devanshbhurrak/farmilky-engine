@@ -6,12 +6,14 @@ import { validateBody, validateParams, validateQuery } from '../../shared/middle
 import type { HonoEnv } from '../../shared/types/index.js';
 import {
   collectionTotalController,
+  listSupplierPaymentsController,
   outstandingController,
   recordSupplierPaymentController,
   supplierPaymentHistoryController,
 } from './supplierPayment.controller.js';
 import {
   collectionTotalQuerySchema,
+  listSupplierPaymentsQuerySchema,
   outstandingQuerySchema,
   recordSupplierPaymentSchema,
   supplierHistoryParamSchema,
@@ -35,6 +37,14 @@ supplierPaymentRoutes.get(
   adminOnly,
   validateQuery(collectionTotalQuerySchema),
   collectionTotalController,
+);
+supplierPaymentRoutes.get(
+  '/',
+  auth,
+  tenant,
+  adminOnly,
+  validateQuery(listSupplierPaymentsQuerySchema),
+  listSupplierPaymentsController,
 );
 supplierPaymentRoutes.post(
   '/',

@@ -49,6 +49,7 @@ orderRoutes.post(
   auth,
   tenant,
   adminOnly,
+  idempotency,
   validateBody(adminCreateOrderSchema),
   adminCreateOrderController,
 );

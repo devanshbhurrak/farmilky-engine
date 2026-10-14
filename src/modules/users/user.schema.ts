@@ -91,6 +91,15 @@ export const userIdParamSchema = z.object({
 
 export type UserIdParam = z.infer<typeof userIdParamSchema>;
 
+export const userAdjustmentSchema = z.object({
+  type: z.enum(['credit_adjustment', 'debit_adjustment']),
+  amount: z.number().positive('amount must be positive'),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD'),
+  notes: z.string().max(500).optional(),
+});
+
+export type UserAdjustmentInput = z.infer<typeof userAdjustmentSchema>;
+
 export const refreshBodySchema = z.object({
   refreshToken: z.string().min(1).optional(),
 });

@@ -29,11 +29,13 @@ export const createTxnItemSchema = z.object({
 });
 
 export const voidTxnSchema = z.object({
-  void_reason: z.string().min(1, 'void_reason is required'),
+  // defaults to 'Admin action' so callers that omit it still succeed
+  void_reason: z.string().min(1).default('Admin action'),
 });
 
 export const editTxnSchema = z.object({
-  void_reason: z.string().min(1, 'void_reason is required'),
+  // defaults to 'Admin action' so callers that omit it still succeed
+  void_reason: z.string().min(1).default('Admin action'),
   amount: z.number().positive().optional(),
   description: z.string().min(1).optional(),
   notes: z.string().optional(),
