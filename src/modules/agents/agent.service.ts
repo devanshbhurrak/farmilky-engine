@@ -173,6 +173,7 @@ export async function createAgentService(
       user.id,
       {
         availability: 'available',
+        joiningDate: input.joiningDate ?? null,
         vehicleType: input.vehicleType ?? null,
         maxCapacity: input.maxCapacity ?? null,
       },
@@ -242,9 +243,14 @@ export async function updateAgentService(
       );
     }
 
-    if (patch.vehicleType !== undefined || patch.maxCapacity !== undefined) {
+    if (
+      patch.joiningDate !== undefined ||
+      patch.vehicleType !== undefined ||
+      patch.maxCapacity !== undefined
+    ) {
       const existing = await findAgentProfileRow(tenantId, id, t);
       const profilePatch: Parameters<typeof updateAgentProfileRow>[2] = {};
+      if (patch.joiningDate !== undefined) profilePatch.joiningDate = patch.joiningDate;
       if (patch.vehicleType !== undefined) profilePatch.vehicleType = patch.vehicleType;
       if (patch.maxCapacity !== undefined) profilePatch.maxCapacity = patch.maxCapacity;
       if (existing) {

@@ -16,6 +16,7 @@ export const createAgentSchema = z.object({
   role: agentRoleSchema.default('delivery'),
   assignedAreaId: uuid.optional(),
   deliverySequence: z.number().int().min(0).optional(),
+  joiningDate: dateString.optional(),
   vehicleType: z.string().max(120).optional(),
   maxCapacity: z.number().int().min(0).optional(),
 });
@@ -30,6 +31,7 @@ export const updateAgentSchema = z.object({
   password: z.string().min(6).optional(),
   assignedAreaId: uuid.nullable().optional(),
   deliverySequence: z.number().int().min(0).nullable().optional(),
+  joiningDate: dateString.nullable().optional(),
   vehicleType: z.string().max(120).nullable().optional(),
   maxCapacity: z.number().int().min(0).nullable().optional(),
 });

@@ -1,10 +1,11 @@
-import { and, count, desc, eq, gt, ilike, isNull, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, gt, ilike, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db } from '../../shared/db/client.js';
 import {
   agentProfiles,
   orders,
   refreshTokens,
   subscriptions,
+  userAddresses,
   users,
 } from '../../shared/db/schema/index.js';
 import type { DBOrTx } from '../../shared/types/index.js';
@@ -135,6 +136,33 @@ export async function listUsersWithCounts(
     .limit(pagination.limit)
     .offset(pagination.offset);
   return rows;
+}
+
+/** Fetch addresses for a set of users, default address first, keyed by userId. */
+export async function listAddressesByUserIds(
+  tenantId: string,
+  userIds: string[],
+  dbOrTx: DBOrTx = db,
+): Promise<Map<string, (typeof userAddresses.$inferSelect)[]>> {
+  const uniqueIds = [...new Set(userIds.filter(Boolean))];
+  const map = new Map<string, (typeof userAddresses.$inferSelect)[]>();
+  if (uniqueIds.length === 0) return map;
+
+  const rows = await (dbOrTx as typeof db)
+    .select()
+    .from(userAddresses)
+    .where(and(eq(userAddresses.tenantId, tenantId), inArray(userAddresses.userId, uniqueIds)));
+
+  for (const row of rows) {
+    const list = map.get(row.userId) ?? [];
+    list.push(row);
+    map.set(row.userId, list);
+  }
+  // Default address first, then oldest as a stable tie-breaker.
+  for (const list of map.values()) {
+    list.sort((a, b) => Number(b.isDefault) - Number(a.isDefault) || a.createdAt.getTime() - b.createdAt.getTime());
+  }
+  return map;
 }
 
 export async function getRecentOrders(

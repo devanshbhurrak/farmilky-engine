@@ -1,11 +1,15 @@
-import { and, count, desc, eq, gte, ilike, lte, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, gte, ilike, inArray, lte, or, sql } from 'drizzle-orm';
 import { db } from '../../shared/db/client.js';
 import type { DBOrTx } from '../../shared/types/index.js';
 import {
+  areas,
+  orderItems,
+  products,
   subscriptionChanges,
   subscriptionDeliveries,
   subscriptions,
   transactions,
+  userAddresses,
   users,
 } from '../../shared/db/schema/index.js';
 
@@ -306,4 +310,98 @@ export async function findActiveTransactionByReference(
     .orderBy(transactions.createdAt)
     .limit(1);
   return rows[0] ?? null;
+}
+
+// ---------- delivery board enrichment ----------
+
+export async function findBoardUsers(
+  tenantId: string,
+  userIds: string[],
+  dbOrTx: DBOrTx = db,
+) {
+  if (userIds.length === 0) return [];
+  return (dbOrTx as typeof db)
+    .select({
+      id: users.id,
+      name: users.name,
+      phone: users.phone,
+      assignedAreaId: users.assignedAreaId,
+    })
+    .from(users)
+    .where(and(eq(users.tenantId, tenantId), inArray(users.id, [...new Set(userIds)])));
+}
+
+export async function findBoardAreas(
+  tenantId: string,
+  areaIds: string[],
+  dbOrTx: DBOrTx = db,
+) {
+  if (areaIds.length === 0) return [];
+  return (dbOrTx as typeof db)
+    .select({ id: areas.id, name: areas.name })
+    .from(areas)
+    .where(and(eq(areas.tenantId, tenantId), inArray(areas.id, [...new Set(areaIds)])));
+}
+
+export async function findBoardProducts(
+  tenantId: string,
+  productIds: string[],
+  dbOrTx: DBOrTx = db,
+) {
+  if (productIds.length === 0) return [];
+  return (dbOrTx as typeof db)
+    .select({ id: products.id, name: products.name, unit: products.unit })
+    .from(products)
+    .where(and(eq(products.tenantId, tenantId), inArray(products.id, [...new Set(productIds)])));
+}
+
+export async function findBoardAddresses(
+  tenantId: string,
+  userIds: string[],
+  dbOrTx: DBOrTx = db,
+) {
+  if (userIds.length === 0) return [];
+  return (dbOrTx as typeof db)
+    .select()
+    .from(userAddresses)
+    .where(
+      and(eq(userAddresses.tenantId, tenantId), inArray(userAddresses.userId, [...new Set(userIds)])),
+    );
+}
+
+export async function findDeliveriesForDate(
+  tenantId: string,
+  subscriptionIds: string[],
+  date: string,
+  dbOrTx: DBOrTx = db,
+) {
+  if (subscriptionIds.length === 0) return [];
+  return (dbOrTx as typeof db)
+    .select()
+    .from(subscriptionDeliveries)
+    .where(
+      and(
+        eq(subscriptionDeliveries.tenantId, tenantId),
+        eq(subscriptionDeliveries.deliveryDate, date),
+        inArray(subscriptionDeliveries.subscriptionId, [...new Set(subscriptionIds)]),
+      ),
+    );
+}
+
+export async function findOrderItemsForBoard(
+  _tenantId: string,
+  orderIds: string[],
+  dbOrTx: DBOrTx = db,
+) {
+  if (orderIds.length === 0) return [];
+  return (dbOrTx as typeof db)
+    .select({
+      orderId: orderItems.orderId,
+      quantity: orderItems.quantity,
+      productId: orderItems.productId,
+      productName: orderItems.productName,
+      unit: orderItems.unit,
+    })
+    .from(orderItems)
+    .where(inArray(orderItems.orderId, [...new Set(orderIds)]));
 }

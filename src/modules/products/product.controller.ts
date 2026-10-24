@@ -38,6 +38,10 @@ export const listProductsController = async (c: Context) => {
     limit,
     offset,
     category: query.category,
+    search: query.search,
+    ...(query.availability !== undefined
+      ? { isAvailable: query.availability === 'available' }
+      : {}),
   });
   return paginated(c, items, buildMeta(total, page, limit));
 };

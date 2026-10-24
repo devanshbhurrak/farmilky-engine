@@ -41,6 +41,8 @@ export const updateProductSchema = createProductSchema.partial().extend({
 export const productListQuerySchema = z.object({
   slug: z.string().min(1).optional(),
   category: categorySchema.optional(),
+  search: z.string().max(120).optional(),
+  availability: z.enum(['available', 'unavailable']).optional(),
   page: z.string().optional(),
   limit: z.string().optional(),
 });

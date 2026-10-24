@@ -6,9 +6,14 @@ import { istToday, toDateOnlyString } from '../../shared/utils/dateUtils.js';
 import { buildMeta, parsePagination } from '../../shared/utils/pagination.js';
 import { transactionService, type CreateTxnParams } from '../transactions/transaction.service.js';
 import { updateTransaction } from '../transactions/transaction.repository.js';
-import { findPaymentById, listCustomerPassbook } from './payment.repository.js';
+import {
+  findPaymentById,
+  listCustomerLedgerForPeriod,
+  listCustomerPassbook,
+} from './payment.repository.js';
 import type {
   DeletePaymentInput,
+  LedgerQuery,
   PassbookQuery,
   RecordPaymentInput,
   UpdatePaymentInput,
@@ -165,6 +170,20 @@ export async function reconcilePayment(
   return withTransaction(run);
 }
 
+function roundMoney(value: number): number {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+/** Inclusive first/last day of a calendar month, using UTC to avoid DST drift. */
+function monthBounds(year: number, month: number): { startDate: string; endDate: string } {
+  const mm = String(month).padStart(2, '0');
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return {
+    startDate: `${year}-${mm}-01`,
+    endDate: `${year}-${mm}-${String(lastDay).padStart(2, '0')}`,
+  };
+}
+
 export async function getPassbook(
   tenantId: string,
   userId: string,
@@ -178,9 +197,7 @@ export async function getPassbook(
   const month = query.month !== undefined ? Number(query.month) : undefined;
   if (year !== undefined && Number.isFinite(year)) {
     if (month !== undefined && Number.isFinite(month)) {
-      const mm = String(month).padStart(2, '0');
-      startDate = `${year}-${mm}-01`;
-      endDate = `${year}-${mm}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}`;
+      ({ startDate, endDate } = monthBounds(year, month));
     } else {
       startDate = `${year}-01-01`;
       endDate = `${year}-12-31`;
@@ -194,4 +211,44 @@ export async function getPassbook(
     dbOrTx,
   );
   return { rows, meta: buildMeta(total, page, limit) };
+}
+
+/**
+ * Full ledger for one customer and calendar month.
+ *
+ * Unlike the paginated passbook this returns every active transaction in the
+ * period, so the UI can render an accurate month summary and never silently
+ * drops entries after the first page.
+ */
+export async function getCustomerLedger(
+  tenantId: string,
+  userId: string,
+  query: LedgerQuery,
+  dbOrTx: DBOrTx = db,
+) {
+  const { startDate, endDate } = monthBounds(query.year, query.month);
+  const rows = await listCustomerLedgerForPeriod(tenantId, userId, startDate, endDate, dbOrTx);
+
+  let totalDebit = 0;
+  let totalCredit = 0;
+  for (const row of rows) {
+    const amount = Number(row.amount);
+    if (!Number.isFinite(amount)) continue;
+    if (row.entryType === 'debit') totalDebit += amount;
+    else totalCredit += amount;
+  }
+
+  const debit = roundMoney(totalDebit);
+  const credit = roundMoney(totalCredit);
+
+  return {
+    entries: rows,
+    summary: {
+      debit,
+      credit,
+      net: roundMoney(debit - credit),
+      count: rows.length,
+      period: { month: query.month, year: query.year, startDate, endDate },
+    },
+  };
 }

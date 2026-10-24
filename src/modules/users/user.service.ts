@@ -31,6 +31,7 @@ import {
   findValidRefreshTokenByHash,
   getActiveSubscriptions,
   getRecentOrders,
+  listAddressesByUserIds,
   listUsersWithCounts,
   revokeRefreshTokenByHash,
   revokeRefreshTokenById,
@@ -47,6 +48,30 @@ function sanitizeUser<T extends Record<string, unknown>>(user: T): Omit<T, 'pass
   const { passwordHash: _omitted, ...rest } = user;
   void _omitted;
   return rest;
+}
+
+/** Shape a DB address row into the API `Address` shape the frontend consumes. */
+function toApiAddress(a: {
+  id: string;
+  street: string | null;
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+  addressType: string;
+  lat: string | null;
+  lng: string | null;
+  isDefault: boolean;
+}) {
+  return {
+    id: a.id,
+    type: a.addressType,
+    street: a.street,
+    city: a.city,
+    state: a.state,
+    pincode: a.pincode,
+    lat: a.lat === null ? null : Number(a.lat),
+    lng: a.lng === null ? null : Number(a.lng),
+  };
 }
 
 async function issueTokenPair(
@@ -233,8 +258,14 @@ export class UserService {
       listUsersWithCounts(tenantId, filters, { limit, offset }, dbOrTx),
       countUsers(tenantId, filters, dbOrTx),
     ]);
+    const addressesByUser = await listAddressesByUserIds(
+      tenantId,
+      rows.map((r) => r.user.id),
+      dbOrTx,
+    );
     const items = rows.map((r) => ({
       ...sanitizeUser(r.user),
+      addresses: (addressesByUser.get(r.user.id) ?? []).map(toApiAddress),
       orderCount: Number(r.orderCount ?? 0),
       subscriptionCount: Number(r.subscriptionCount ?? 0),
     }));
@@ -245,12 +276,13 @@ export class UserService {
     const dbOrTx: DBOrTx = tx ?? db;
     const user = await findUserById(id, tenantId, dbOrTx);
     if (!user) throw new AppError('User not found', 404);
-    const [recentOrders, activeSubscriptions] = await Promise.all([
+    const [recentOrders, activeSubscriptions, addressesByUser] = await Promise.all([
       getRecentOrders(id, tenantId, 5, dbOrTx),
       getActiveSubscriptions(id, tenantId, dbOrTx),
+      listAddressesByUserIds(tenantId, [id], dbOrTx),
     ]);
     return {
-      user: sanitizeUser(user),
+      user: { ...sanitizeUser(user), addresses: (addressesByUser.get(id) ?? []).map(toApiAddress) },
       recentOrders,
       activeSubscriptions,
     };

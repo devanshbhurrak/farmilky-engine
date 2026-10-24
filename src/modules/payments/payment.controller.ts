@@ -3,13 +3,21 @@ import type { AuthUser } from '../../shared/types/index.js';
 import { created, ok, paginated } from '../../shared/utils/response.js';
 import type {
   DeletePaymentInput,
+  LedgerQuery,
   PassbookQuery,
   PaymentIdParam,
   PaymentUserParam,
   RecordPaymentInput,
   UpdatePaymentInput,
 } from './payment.schema.js';
-import { deletePayment, getPassbook, reconcilePayment, recordPayment, updatePayment } from './payment.service.js';
+import {
+  deletePayment,
+  getCustomerLedger,
+  getPassbook,
+  reconcilePayment,
+  recordPayment,
+  updatePayment,
+} from './payment.service.js';
 
 export const myPassbookController = async (c: Context) => {
   const user = c.get('user') as AuthUser;
@@ -24,6 +32,14 @@ export const userPassbookController = async (c: Context) => {
   const query = (c.get('query') ?? {}) as PassbookQuery;
   const { rows, meta } = await getPassbook(user.tenantId, params.userId, query);
   return paginated(c, rows, meta);
+};
+
+export const userLedgerController = async (c: Context) => {
+  const user = c.get('user') as AuthUser;
+  const params = c.get('params') as PaymentUserParam;
+  const query = (c.get('query') ?? {}) as LedgerQuery;
+  const ledger = await getCustomerLedger(user.tenantId, params.userId, query);
+  return ok(c, ledger);
 };
 
 export const recordPaymentController = async (c: Context) => {

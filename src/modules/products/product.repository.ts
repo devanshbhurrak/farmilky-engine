@@ -1,4 +1,4 @@
-import { and, count, desc, eq, inArray, isNull, notInArray, sql } from 'drizzle-orm';
+import { and, count, desc, eq, ilike, inArray, isNull, notInArray, or, sql } from 'drizzle-orm';
 import { db } from '../../shared/db/client.js';
 import type { DBOrTx } from '../../shared/types/index.js';
 import { customerPrices, products, productVariants, tenants } from '../../shared/db/schema/index.js';
@@ -12,19 +12,36 @@ export async function findTenantBySlug(slug: string, dbOrTx: DBOrTx = db) {
   return rows[0];
 }
 
-export async function listProducts(
-  tenantId: string,
-  opts: { limit: number; offset: number; category?: string },
-  dbOrTx: DBOrTx = db,
-) {
+interface ProductListFilters {
+  category?: string;
+  search?: string;
+  isAvailable?: boolean;
+}
+
+function buildProductConditions(tenantId: string, opts: ProductListFilters) {
   const conditions = [eq(products.tenantId, tenantId), isNull(products.deletedAt)];
   if (opts.category) {
     conditions.push(eq(products.category, opts.category as typeof products.category.enumValues[number]));
   }
+  if (opts.isAvailable !== undefined) {
+    conditions.push(eq(products.isAvailable, opts.isAvailable));
+  }
+  if (opts.search && opts.search.trim() !== '') {
+    const q = `%${opts.search.trim()}%`;
+    conditions.push(or(ilike(products.name, q), ilike(products.description, q))!);
+  }
+  return and(...conditions);
+}
+
+export async function listProducts(
+  tenantId: string,
+  opts: { limit: number; offset: number } & ProductListFilters,
+  dbOrTx: DBOrTx = db,
+) {
   return (dbOrTx as typeof db)
     .select()
     .from(products)
-    .where(and(...conditions))
+    .where(buildProductConditions(tenantId, opts))
     .orderBy(products.sortOrder, products.name)
     .limit(opts.limit)
     .offset(opts.offset);
@@ -32,17 +49,13 @@ export async function listProducts(
 
 export async function countProducts(
   tenantId: string,
-  opts: { category?: string },
+  opts: ProductListFilters,
   dbOrTx: DBOrTx = db,
 ) {
-  const conditions = [eq(products.tenantId, tenantId), isNull(products.deletedAt)];
-  if (opts.category) {
-    conditions.push(eq(products.category, opts.category as typeof products.category.enumValues[number]));
-  }
   const rows = await (dbOrTx as typeof db)
     .select({ value: count() })
     .from(products)
-    .where(and(...conditions));
+    .where(buildProductConditions(tenantId, opts));
   return rows[0]?.value ?? 0;
 }
 

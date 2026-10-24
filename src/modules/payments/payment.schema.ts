@@ -42,6 +42,11 @@ export const passbookQuerySchema = z.object({
   year: z.coerce.number().int().min(2000).max(2100).optional(),
 });
 
+export const ledgerQuerySchema = z.object({
+  month: z.coerce.number().int().min(1).max(12),
+  year: z.coerce.number().int().min(2000).max(2100),
+});
+
 export const paymentIdParamSchema = z.object({
   id: z.string().uuid(),
 });
@@ -54,5 +59,6 @@ export type RecordPaymentInput = z.infer<typeof recordPaymentSchema>;
 export type UpdatePaymentInput = z.infer<typeof updatePaymentSchema>;
 export type DeletePaymentInput = z.infer<typeof deletePaymentSchema>;
 export type PassbookQuery = z.infer<typeof passbookQuerySchema>;
+export type LedgerQuery = z.infer<typeof ledgerQuerySchema>;
 export type PaymentIdParam = z.infer<typeof paymentIdParamSchema>;
 export type PaymentUserParam = z.infer<typeof paymentUserParamSchema>;

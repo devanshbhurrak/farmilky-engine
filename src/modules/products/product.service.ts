@@ -52,12 +52,24 @@ function stripUndefined<T extends Record<string, unknown>>(obj: T): Partial<T> {
 
 export async function listPublicProducts(
   tenantId: string,
-  opts: { page: number; limit: number; offset: number; category?: string },
+  opts: {
+    page: number;
+    limit: number;
+    offset: number;
+    category?: string;
+    search?: string;
+    isAvailable?: boolean;
+  },
   dbOrTx: DBOrTx = db,
 ) {
+  const filters = {
+    category: opts.category,
+    search: opts.search,
+    isAvailable: opts.isAvailable,
+  };
   const [items, total] = await Promise.all([
-    listProducts(tenantId, { limit: opts.limit, offset: opts.offset, category: opts.category }, dbOrTx),
-    countProducts(tenantId, { category: opts.category }, dbOrTx),
+    listProducts(tenantId, { limit: opts.limit, offset: opts.offset, ...filters }, dbOrTx),
+    countProducts(tenantId, filters, dbOrTx),
   ]);
   const variants = await findVariantsByProductIds(
     tenantId,

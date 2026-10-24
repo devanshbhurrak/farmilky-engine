@@ -12,10 +12,12 @@ import {
   reconcilePaymentController,
   recordPaymentController,
   updatePaymentController,
+  userLedgerController,
   userPassbookController,
 } from './payment.controller.js';
 import {
   deletePaymentSchema,
+  ledgerQuerySchema,
   passbookQuerySchema,
   paymentIdParamSchema,
   paymentUserParamSchema,
@@ -36,6 +38,17 @@ const adminOrDeliveryPartner = createMiddleware<HonoEnv>(async (c, next) => {
 });
 
 paymentRoutes.get('/my-passbook', auth, tenant, validateQuery(passbookQuerySchema), myPassbookController);
+// Full month ledger (entries + totals) in a single request. Registered before
+// '/:userId' so the static suffix cannot be shadowed.
+paymentRoutes.get(
+  '/:userId/ledger',
+  auth,
+  tenant,
+  adminOnly,
+  validateParams(paymentUserParamSchema),
+  validateQuery(ledgerQuerySchema),
+  userLedgerController,
+);
 // '/:userId' is registered AFTER '/my-passbook' so the static route is not shadowed.
 paymentRoutes.get(
   '/:userId',

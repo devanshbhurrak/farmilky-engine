@@ -187,7 +187,12 @@ export async function findAgentProfileRow(
 export async function insertAgentProfileRow(
   tenantId: string,
   userId: string,
-  data: { availability?: 'available' | 'busy' | 'offline'; vehicleType?: string | null; maxCapacity?: number | null },
+  data: {
+    availability?: 'available' | 'busy' | 'offline';
+    joiningDate?: string | null;
+    vehicleType?: string | null;
+    maxCapacity?: number | null;
+  },
   dbOrTx: DBOrTx = db,
 ) {
   const rows = await (dbOrTx as typeof db)
@@ -196,6 +201,7 @@ export async function insertAgentProfileRow(
       tenantId,
       userId,
       availability: data.availability ?? 'available',
+      joiningDate: data.joiningDate ?? null,
       vehicleType: data.vehicleType ?? null,
       maxCapacity: data.maxCapacity ?? null,
     })
@@ -206,7 +212,12 @@ export async function insertAgentProfileRow(
 export async function updateAgentProfileRow(
   tenantId: string,
   userId: string,
-  patch: Partial<{ availability: 'available' | 'busy' | 'offline'; vehicleType: string | null; maxCapacity: number | null }>,
+  patch: Partial<{
+    availability: 'available' | 'busy' | 'offline';
+    joiningDate: string | null;
+    vehicleType: string | null;
+    maxCapacity: number | null;
+  }>,
   dbOrTx: DBOrTx = db,
 ) {
   const rows = await (dbOrTx as typeof db)
