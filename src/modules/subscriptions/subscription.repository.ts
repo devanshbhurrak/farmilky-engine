@@ -413,7 +413,9 @@ export async function findBoardUsers(
       id: users.id,
       name: users.name,
       phone: users.phone,
+      email: users.email,
       assignedAreaId: users.assignedAreaId,
+      deliverySequence: users.deliverySequence,
     })
     .from(users)
     .where(and(eq(users.tenantId, tenantId), inArray(users.id, [...new Set(userIds)])));

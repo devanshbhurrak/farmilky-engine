@@ -19,10 +19,10 @@ import {
   incrementVariantStockRow,
 } from '../products/product.repository.js';
 import { decrementVariantStock, resolvePrice } from '../products/product.service.js';
-import { decrementProductStockRow, incrementProductStockRow } from '../orders/order.repository.js';
+import { decrementProductStockRow, findOrderItemsForBoard, incrementProductStockRow, type Order } from '../orders/order.repository.js';
 import { getTenantSettings } from '../tenants/tenant.settings.js';
 import { transactionService } from '../transactions/transaction.service.js';
-import type { Subscription } from '../../shared/db/schema/index.js';
+import type { Subscription, SubscriptionDelivery, UserAddress } from '../../shared/db/schema/index.js';
 import type { subscriptionChanges } from '../../shared/db/schema/index.js';
 import {
   advanceToNextDue,
@@ -33,6 +33,11 @@ import {
   countSubscriptionsAdmin,
   deleteDeliveryRow,
   findActiveTransactionByReference,
+  findBoardAddresses,
+  findBoardAreas,
+  findBoardProducts,
+  findBoardUsers,
+  findDeliveriesForDate,
   findDeliveryById,
   findDeliveryBySubscriptionAndDate,
   findSubscriptionById,
