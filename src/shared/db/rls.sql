@@ -11,7 +11,7 @@ BEGIN
     'users','agent_profiles','user_addresses','refresh_tokens',
     'products','product_variants','customer_prices',
     'areas','carts',
-    'orders','subscriptions','subscription_deliveries','subscription_changes',
+    'orders','subscriptions','subscription_slots','subscription_deliveries','subscription_changes',
     'transactions','invoice_allocations','transaction_settlements',
     'invoices','delivery_manifests','manifest_entries',
     'holidays','complaints','returns',

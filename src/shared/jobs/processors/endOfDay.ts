@@ -42,6 +42,7 @@ async function processEndOfDayTenant(tenantId: string): Promise<void> {
                   tenantId,
                   {
                     deliveryDate: row.manifest.manifestDate,
+                    slot: row.manifest.deliverySlot,
                     status: 'failed',
                     reason: 'not attempted',
                   },

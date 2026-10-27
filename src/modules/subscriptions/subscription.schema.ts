@@ -17,21 +17,67 @@ export const dayNameSchema = z.enum([
   'Saturday',
 ]);
 
-export const createSubscriptionSchema = z.object({
+// Per-slot configuration for a subscription. A subscription may deliver in
+// multiple slots (morning and/or evening), each with its own quantity.
+export const subscriptionSlotInputSchema = z.object({
+  slot: deliverySlotSchema,
+  quantityPerDelivery: z
+    .number()
+    .positive('quantityPerDelivery must be positive')
+    .optional(),
+});
+
+const createSubscriptionBaseSchema = z.object({
   productId: uuid,
   variantId: uuid.optional(),
+  // Default quantity: legacy single-slot input and fallback for slot entries
+  // that omit their own quantityPerDelivery.
   quantityPerDelivery: z.number().positive('quantityPerDelivery must be positive'),
-  deliverySlot: deliverySlotSchema,
+  // Legacy single-slot input.
+  deliverySlot: deliverySlotSchema.optional(),
+  // Multi-slot input; when present it takes precedence over deliverySlot.
+  deliverySlots: z.array(subscriptionSlotInputSchema).min(1).max(2).optional(),
   deliverySchedule: deliveryScheduleSchema.default('daily'),
   customDays: z.array(dayNameSchema).default([]),
   startDate: dateString.optional(),
   areaId: uuid.optional(),
 });
 
-export const adminCreateSubscriptionSchema = createSubscriptionSchema.extend({
-  userId: uuid,
-  customPrice: z.number().positive('customPrice must be positive').optional(),
-});
+const slotConfigRefine = (
+  v: { deliverySlot?: 'morning' | 'evening'; deliverySlots?: Array<{ slot: string }> },
+  ctx: z.RefinementCtx,
+) => {
+  if (v.deliverySlots?.length) {
+    const seen = new Set<string>();
+    for (const entry of v.deliverySlots) {
+      if (seen.has(entry.slot)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Duplicate slot: ${entry.slot}`,
+          path: ['deliverySlots'],
+        });
+      }
+      seen.add(entry.slot);
+    }
+    return;
+  }
+  if (!v.deliverySlot) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'deliverySlot or deliverySlots is required',
+      path: ['deliverySlot'],
+    });
+  }
+};
+
+export const createSubscriptionSchema = createSubscriptionBaseSchema.superRefine(slotConfigRefine);
+
+export const adminCreateSubscriptionSchema = createSubscriptionBaseSchema
+  .extend({
+    userId: uuid,
+    customPrice: z.number().positive('customPrice must be positive').optional(),
+  })
+  .superRefine(slotConfigRefine);
 
 export const updateSubscriptionSchema = z.object({
   quantityPerDelivery: z.number().positive('quantityPerDelivery must be positive').optional(),
@@ -44,6 +90,9 @@ export const adminUpdateSubscriptionSchema = z.object({
   variantId: uuid.nullable().optional(),
   quantityPerDelivery: z.number().positive('quantityPerDelivery must be positive').optional(),
   deliverySlot: deliverySlotSchema.optional(),
+  // Per-slot quantities for multi-slot subscriptions. The set of slots is
+  // immutable (cancel + recreate to change it); only quantities may change.
+  deliverySlots: z.array(subscriptionSlotInputSchema).min(1).max(2).optional(),
   deliverySchedule: deliveryScheduleSchema.optional(),
   customDays: z.array(dayNameSchema).optional(),
   pricePerPacket: z.number().positive('pricePerPacket must be positive').optional(),
@@ -69,6 +118,8 @@ export const scheduleChangeSchema = z
     effectiveDate: dateString,
     scheduledQty: z.number().positive('scheduledQty must be positive').optional(),
     scheduledPrice: z.number().positive('scheduledPrice must be positive').optional(),
+    // Target slot for scheduledQty on multi-slot subscriptions.
+    slot: deliverySlotSchema.optional(),
   })
   .refine((v) => v.scheduledQty !== undefined || v.scheduledPrice !== undefined, {
     message: 'At least one of scheduledQty or scheduledPrice is required',
@@ -77,6 +128,8 @@ export const scheduleChangeSchema = z
 export const recordDeliveryOutcomeSchema = z
   .object({
     deliveryDate: dateString,
+    // Required only for multi-slot subscriptions; defaults to the sole slot.
+    slot: deliverySlotSchema.optional(),
     status: deliveryOutcomeSchema,
     actualQuantity: z.number().positive('actualQuantity must be positive').optional(),
     reason: z.string().max(500).optional(),
@@ -101,6 +154,7 @@ export const recordDeliveryOutcomeSchema = z
 
 export const agentDeliveryOutcomeSchema = z.object({
   deliveryDate: dateString.optional(),
+  slot: deliverySlotSchema.optional(),
   status: z.enum(['delivered', 'failed']),
   notes: z.string().max(1000).optional(),
   reason: z.string().max(500).optional(),
@@ -146,6 +200,7 @@ export const historyQuerySchema = z.object({
   limit: z.string().optional(),
 });
 
+export type SubscriptionSlotInput = z.infer<typeof subscriptionSlotInputSchema>;
 export type CreateSubscriptionInput = z.infer<typeof createSubscriptionSchema>;
 export type AdminCreateSubscriptionInput = z.infer<typeof adminCreateSubscriptionSchema>;
 export type UpdateSubscriptionInput = z.infer<typeof updateSubscriptionSchema>;

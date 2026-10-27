@@ -9,7 +9,10 @@ import { getHolidayDateSet } from '../../../modules/holidays/holiday.service.js'
 import { generateManifestsForDate } from '../../../modules/manifests/manifest.service.js';
 import {
   insertSubscriptionChange,
+  insertSubscriptionSlots,
+  listSubscriptionSlots,
   updateSubscriptionRow,
+  updateSubscriptionSlotQty,
 } from '../../../modules/subscriptions/subscription.repository.js';
 import { calculateNextDeliveryDate } from '../../../modules/subscriptions/subscription.schedule.js';
 
@@ -61,12 +64,34 @@ async function processDailyTenant(tenantId: string): Promise<void> {
         const patch: Partial<typeof subscriptions.$inferInsert> = {
           scheduledQty: null,
           scheduledPrice: null,
+          scheduledSlot: null,
           scheduledChangeDate: null,
         };
         if (sub.scheduledQty != null) patch.quantityPerDelivery = String(newQty);
         if (sub.scheduledPrice != null) patch.pricePerPacket = newPrice.toFixed(2);
         if (sub.scheduledQty != null || sub.scheduledPrice != null) {
           patch.totalPricePerDelivery = total.toFixed(2);
+        }
+        // Keep per-slot rows consistent with the row-level scheduled change.
+        if (sub.scheduledQty != null) {
+          const slotRows = await listSubscriptionSlots(tenantId, sub.id, tx);
+          const target = sub.scheduledSlot ?? (slotRows.length === 1 ? slotRows[0].deliverySlot : null);
+          if (target) {
+            if (slotRows.some((r) => r.deliverySlot === target)) {
+              await updateSubscriptionSlotQty(tenantId, sub.id, target, String(newQty), tx);
+            } else {
+              await insertSubscriptionSlots(
+                tenantId,
+                [{ subscriptionId: sub.id, deliverySlot: target, quantityPerDelivery: String(newQty) }],
+                tx,
+              );
+            }
+            // Row-level quantity is the daily total across slots.
+            const fresh = await listSubscriptionSlots(tenantId, sub.id, tx);
+            const sum = fresh.reduce((acc, r) => acc + Number(r.quantityPerDelivery), 0);
+            patch.quantityPerDelivery = String(sum);
+            patch.totalPricePerDelivery = round2(sum * newPrice).toFixed(2);
+          }
         }
         await updateSubscriptionRow(tenantId, sub.id, patch, tx);
         await insertSubscriptionChange(

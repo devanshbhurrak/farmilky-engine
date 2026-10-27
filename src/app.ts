@@ -43,6 +43,8 @@ import { utilsRoutes } from './modules/utils/utils.routes.js';
 import { upiRoutes } from './modules/upi/upi.routes.js';
 import { sseRoutes } from './modules/sse/sse.routes.js';
 import { cronRoutes } from './modules/cron/cron.routes.js';
+import { uploadRoutes } from './modules/uploads/upload.routes.js';
+import { serveImage } from './modules/uploads/upload.controller.js';
 
 // Pure route assembly — no I/O, no side effects. Safe to import anywhere
 // (tests, Cloudflare Workers) without connecting to the database.
@@ -107,8 +109,13 @@ export function createApp() {
 
   app.use('/api/contact/*', contactLimiter);
   app.route('/api/contact', contactRoutes);
-  app.use('/api/utils/*', utilsLimiter);
+    app.use('/api/utils/*', utilsLimiter);
   app.route('/api/utils', utilsRoutes);
+
+  // Public image proxy — serves R2 images through authenticated backend access.
+  // Must be registered BEFORE uploadRoutes to bypass the auth/adminOnly middleware.
+  app.get('/api/upload/image/serve', serveImage);
+  app.route('/api/upload', uploadRoutes);
 
   app.route('/', upiRoutes);
 

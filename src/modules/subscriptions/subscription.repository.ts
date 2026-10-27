@@ -1,4 +1,4 @@
-import { and, count, desc, eq, gte, ilike, inArray, lte, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, exists, gte, ilike, inArray, lte, or, sql } from 'drizzle-orm';
 import { db } from '../../shared/db/client.js';
 import type { DBOrTx } from '../../shared/types/index.js';
 import {
@@ -7,6 +7,7 @@ import {
   products,
   subscriptionChanges,
   subscriptionDeliveries,
+  subscriptionSlots,
   subscriptions,
   transactions,
   userAddresses,
@@ -15,6 +16,8 @@ import {
 
 export type SubscriptionRow = typeof subscriptions.$inferSelect;
 export type SubscriptionInsert = typeof subscriptions.$inferInsert;
+export type SubscriptionSlotRow = typeof subscriptionSlots.$inferSelect;
+export type SubscriptionSlotInsert = typeof subscriptionSlots.$inferInsert;
 export type DeliveryInsert = typeof subscriptionDeliveries.$inferInsert;
 export type ChangeInsert = typeof subscriptionChanges.$inferInsert;
 
@@ -81,12 +84,96 @@ export async function listActiveSubscriptionsDue(
     eq(subscriptions.status, 'active'),
     lte(subscriptions.nextDeliveryDate, opts.maxNextDate),
   ];
-  if (opts.slot) conditions.push(eq(subscriptions.deliverySlot, opts.slot));
+  if (opts.slot) {
+    // Multi-slot aware: a subscription is due in a slot when it has a
+    // subscription_slots row for it (single-slot legacy rows are backfilled).
+    const slotMatch = (dbOrTx as typeof db)
+      .select({ id: subscriptionSlots.id })
+      .from(subscriptionSlots)
+      .where(
+        and(
+          eq(subscriptionSlots.tenantId, tenantId),
+          eq(subscriptionSlots.subscriptionId, subscriptions.id),
+          eq(subscriptionSlots.deliverySlot, opts.slot),
+        ),
+      );
+    conditions.push(exists(slotMatch));
+  }
   return (dbOrTx as typeof db)
     .select()
     .from(subscriptions)
     .where(and(...conditions))
     .orderBy(subscriptions.nextDeliveryDate, subscriptions.deliverySlot);
+}
+
+// ---------- per-slot config ----------
+
+export async function insertSubscriptionSlots(
+  tenantId: string,
+  rows: Omit<SubscriptionSlotInsert, 'tenantId'>[],
+  dbOrTx: DBOrTx = db,
+) {
+  if (rows.length === 0) return [];
+  return (dbOrTx as typeof db)
+    .insert(subscriptionSlots)
+    .values(rows.map((r) => ({ ...r, tenantId })))
+    .returning();
+}
+
+export async function listSubscriptionSlots(
+  tenantId: string,
+  subscriptionId: string,
+  dbOrTx: DBOrTx = db,
+) {
+  return (dbOrTx as typeof db)
+    .select()
+    .from(subscriptionSlots)
+    .where(
+      and(
+        eq(subscriptionSlots.tenantId, tenantId),
+        eq(subscriptionSlots.subscriptionId, subscriptionId),
+      ),
+    )
+    .orderBy(subscriptionSlots.deliverySlot);
+}
+
+export async function listSubscriptionSlotsForSubs(
+  tenantId: string,
+  subscriptionIds: string[],
+  dbOrTx: DBOrTx = db,
+) {
+  if (subscriptionIds.length === 0) return [];
+  return (dbOrTx as typeof db)
+    .select()
+    .from(subscriptionSlots)
+    .where(
+      and(
+        eq(subscriptionSlots.tenantId, tenantId),
+        inArray(subscriptionSlots.subscriptionId, [...new Set(subscriptionIds)]),
+      ),
+    )
+    .orderBy(subscriptionSlots.deliverySlot);
+}
+
+export async function updateSubscriptionSlotQty(
+  tenantId: string,
+  subscriptionId: string,
+  slot: 'morning' | 'evening',
+  quantityPerDelivery: string,
+  dbOrTx: DBOrTx = db,
+) {
+  const rows = await (dbOrTx as typeof db)
+    .update(subscriptionSlots)
+    .set({ quantityPerDelivery, updatedAt: new Date() })
+    .where(
+      and(
+        eq(subscriptionSlots.tenantId, tenantId),
+        eq(subscriptionSlots.subscriptionId, subscriptionId),
+        eq(subscriptionSlots.deliverySlot, slot),
+      ),
+    )
+    .returning();
+  return rows[0];
 }
 
 export async function listSubscriptionsAdmin(
@@ -159,18 +246,19 @@ export async function findDeliveryBySubscriptionAndDate(
   tenantId: string,
   subscriptionId: string,
   deliveryDate: string,
+  slot?: 'morning' | 'evening',
   dbOrTx: DBOrTx = db,
 ) {
+  const conditions = [
+    eq(subscriptionDeliveries.tenantId, tenantId),
+    eq(subscriptionDeliveries.subscriptionId, subscriptionId),
+    eq(subscriptionDeliveries.deliveryDate, deliveryDate),
+  ];
+  if (slot) conditions.push(eq(subscriptionDeliveries.deliverySlot, slot));
   const rows = await (dbOrTx as typeof db)
     .select()
     .from(subscriptionDeliveries)
-    .where(
-      and(
-        eq(subscriptionDeliveries.tenantId, tenantId),
-        eq(subscriptionDeliveries.subscriptionId, subscriptionId),
-        eq(subscriptionDeliveries.deliveryDate, deliveryDate),
-      ),
-    )
+    .where(and(...conditions))
     .limit(1);
   return rows[0];
 }

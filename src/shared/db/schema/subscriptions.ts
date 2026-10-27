@@ -8,6 +8,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
@@ -41,7 +42,11 @@ export const subscriptions = pgTable(
     variantLabel: text('variant_label'),
     variantUnit: text('variant_unit'),
     variantQuantity: numeric('variant_quantity', { precision: 10, scale: 3 }),
+    // Daily total across all delivery slots (sum of subscription_slots rows).
     quantityPerDelivery: numeric('quantity_per_delivery', { precision: 10, scale: 3 }).notNull(),
+    // Legacy single-slot column. For multi-slot subscriptions this stores the
+    // primary (first) slot; the subscription_slots table is authoritative for
+    // slot membership and per-slot quantities.
     deliverySlot: deliverySlotEnum('delivery_slot').notNull(),
     deliverySchedule: deliveryScheduleEnum('delivery_schedule').notNull().default('daily'),
     customDays: text('custom_days').array().notNull().default([]),
@@ -58,6 +63,8 @@ export const subscriptions = pgTable(
     skippedDates: date('skipped_dates').array().notNull().default([]),
     scheduledQty: numeric('scheduled_qty', { precision: 10, scale: 3 }),
     scheduledPrice: numeric('scheduled_price', { precision: 10, scale: 2 }),
+    // Target slot for scheduledQty on multi-slot subscriptions.
+    scheduledSlot: deliverySlotEnum('scheduled_slot'),
     scheduledChangeDate: date('scheduled_change_date'),
     scheduledEndDate: date('scheduled_end_date'),
     createdById: uuid('created_by_id').references(() => users.id),
@@ -105,6 +112,31 @@ export const subscriptionDeliveries = pgTable(
   ],
 );
 
+// Per-slot configuration for a subscription. A subscription may deliver in
+// both morning and evening with an independent quantity per slot. Row-level
+// subscriptions.quantityPerDelivery stays the sum of these quantities.
+export const subscriptionSlots = pgTable(
+  'subscription_slots',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id),
+    subscriptionId: uuid('subscription_id')
+      .notNull()
+      .references(() => subscriptions.id, { onDelete: 'cascade' }),
+    deliverySlot: deliverySlotEnum('delivery_slot').notNull(),
+    quantityPerDelivery: numeric('quantity_per_delivery', { precision: 10, scale: 3 }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('sub_slots_sub_slot_unique').on(t.subscriptionId, t.deliverySlot),
+    index('sub_slots_tenant_slot_idx').on(t.tenantId, t.deliverySlot),
+    check('sub_slots_qty_check', sql`${t.quantityPerDelivery} > 0`),
+  ],
+);
+
 export const subscriptionChanges = pgTable(
   'subscription_changes',
   {
@@ -128,5 +160,7 @@ export const subscriptionChanges = pgTable(
 
 export type Subscription = typeof subscriptions.$inferSelect;
 export type NewSubscription = typeof subscriptions.$inferInsert;
+export type SubscriptionSlot = typeof subscriptionSlots.$inferSelect;
+export type NewSubscriptionSlot = typeof subscriptionSlots.$inferInsert;
 export type SubscriptionDelivery = typeof subscriptionDeliveries.$inferSelect;
 export type SubscriptionChange = typeof subscriptionChanges.$inferSelect;

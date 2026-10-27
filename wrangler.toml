@@ -2,3 +2,10 @@ name = "farmilky-api"
 main = "src/worker.ts"
 compatibility_date = "2024-01-01"
 node_compat = true
+
+[vars]
+R2_ACCOUNT_ID        = ""
+R2_ACCESS_KEY_ID     = ""
+R2_SECRET_ACCESS_KEY = ""
+R2_BUCKET_NAME       = ""
+R2_PUBLIC_URL        = ""

@@ -18,6 +18,7 @@ import {
   listPendingByDate,
   updateCollectionRow,
 } from './milkCollection.repository.js';
+import type { CollectionRow } from './milkCollection.repository.js';
 import type {
   BulkConfirmInput,
   ConfirmInput,
@@ -30,6 +31,53 @@ function toNum(v: string | number | null | undefined, fallback = 0): number {
   if (v === null || v === undefined) return fallback;
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+/** Frontend-facing shape: camelCase field names, numbers, and derived fields. */
+export interface CollectionDTO {
+  id: string;
+  supplierId: string;
+  supplierName: string | null;
+  date: string;
+  session: string;
+  expectedQty: number;
+  actualQty: number | null;
+  ratePerLiter: number;
+  fatContent: number | null;
+  snf: number | null;
+  amount: number;
+  status: string;
+  isConfirmed: boolean;
+  notes: string | null;
+  createdAt: string;
+}
+
+/**
+ * Transforms a raw DB row (with aliased columns from the repository) into the
+ * frontend `MilkCollection` shape: converts numeric strings to numbers,
+ * computes `amount` from `actualQty × ratePerLiter`, and derives
+ * `isConfirmed` from `status`.
+ */
+function mapCollectionRow(row: CollectionRow): CollectionDTO {
+  const actualQty = row.actualQty != null ? Number(row.actualQty) : null;
+  const ratePerLiter = toNum(row.ratePerLiter);
+  return {
+    id: row.id,
+    supplierId: row.supplierId,
+    supplierName: row.supplierName ?? null,
+    date: row.date,
+    session: row.session,
+    expectedQty: toNum(row.expectedQty),
+    actualQty,
+    ratePerLiter,
+    fatContent: row.fatContent != null ? Number(row.fatContent) : null,
+    snf: row.snf != null ? Number(row.snf) : null,
+    amount: (actualQty ?? 0) * ratePerLiter,
+    status: row.status,
+    isConfirmed: row.status === 'confirmed',
+    notes: row.notes,
+    createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString(),
+  };
 }
 
 async function doConfirm(
@@ -50,10 +98,13 @@ async function doConfirm(
     );
   }
   const amount = round2(params.actualQty * params.ratePerLiter);
-  if (!(amount > 0)) throw new AppError('Collection amount must be greater than zero', 400);
   const supplier = await findSupplierById(tenantId, collection.supplierId, t);
   if (!supplier) throw new AppError('Supplier not found', 404);
-  const txn = await transactionService.createTransaction(
+  // For zero-amount collections (e.g. "no supply"), confirm the entry without
+  // creating a financial transaction — there is nothing to settle.
+  let txn = null;
+  if (amount > 0) {
+    txn = await transactionService.createTransaction(
     {
       tenantId,
       partyType: 'supplier',
@@ -70,6 +121,7 @@ async function doConfirm(
     },
     t,
   );
+  }
   const updated = await updateCollectionRow(
     collection.id,
     {
@@ -165,15 +217,16 @@ export async function generateCollections(tenantId: string, date: string, _admin
 export async function getDailyCollections(tenantId: string, date: string, dbOrTx: DBOrTx = db) {
   await generateCollections(tenantId, date);
   const rows = await listCollectionsByDate(tenantId, date, dbOrTx);
-  const confirmed = rows.filter((r) => r.status === 'confirmed');
+  const collections = rows.map(mapCollectionRow);
+  const confirmed = collections.filter((c) => c.isConfirmed);
   return {
-    collections: rows,
+    collections,
     summary: {
-      total: rows.length,
-      pending: rows.filter((r) => r.status === 'pending').length,
+      total: collections.length,
+      pending: collections.filter((c) => !c.isConfirmed).length,
       confirmed: confirmed.length,
-      totalLiters: round2(confirmed.reduce((s, r) => s + toNum(r.actualQty), 0)),
-      totalAmount: round2(confirmed.reduce((s, r) => s + toNum(r.actualQty) * toNum(r.ratePerLiter), 0)),
+      totalLiters: round2(confirmed.reduce((s, c) => s + (c.actualQty ?? 0), 0)),
+      totalAmount: round2(confirmed.reduce((s, c) => s + (c.actualQty ?? 0) * c.ratePerLiter, 0)),
     },
     date,
   };
@@ -205,7 +258,7 @@ export async function getCollectionHistory(tenantId: string, query: HistoryQuery
     { limit, offset },
     dbOrTx,
   );
-  return { rows, meta: buildMeta(total, page, limit), aggregates };
+  return { rows: rows.map(mapCollectionRow), meta: buildMeta(total, page, limit), aggregates };
 }
 
 export async function updateCollection(
@@ -232,27 +285,37 @@ export async function updateCollection(
     const newRate = input.ratePerLiter ?? toNum(collection.ratePerLiter);
     const existingTxn = await findActiveTxnForCollection(tenantId, collection.id, t);
     if (existingTxn) {
-      await transactionService.voidTransaction(existingTxn.id, tenantId, input.void_reason, adminId, t);
+      await transactionService.voidTransaction(
+        existingTxn.id,
+        tenantId,
+        input.void_reason ?? 'Correction',
+        adminId,
+        t,
+      );
     }
     const amount = round2(newQty * newRate);
-    if (!(amount > 0)) throw new AppError('Collection amount must be greater than zero', 400);
-    const txn = await transactionService.createTransaction(
-      {
-        tenantId,
-        partyType: 'supplier',
-        partyId: collection.supplierId,
-        txnType: 'milk_collection',
-        entryType: 'credit',
-        amount,
-        effectiveDate: collection.collectionDate,
-        referenceType: 'milk_collection',
-        referenceId: collection.id,
-        description: `Milk collection correction ${collection.collectionDate} (${collection.session})`,
-        notes: input.notes ?? null,
-        createdById: adminId,
-      },
-      t,
-    );
+    // For zero-amount corrections, void the old transaction but skip creating
+    // a new one — nothing to settle.
+    let txn = null;
+    if (amount > 0) {
+      txn = await transactionService.createTransaction(
+        {
+          tenantId,
+          partyType: 'supplier',
+          partyId: collection.supplierId,
+          txnType: 'milk_collection',
+          entryType: 'credit',
+          amount,
+          effectiveDate: collection.collectionDate,
+          referenceType: 'milk_collection',
+          referenceId: collection.id,
+          description: `Milk collection correction ${collection.collectionDate} (${collection.session})`,
+          notes: input.notes ?? null,
+          createdById: adminId,
+        },
+        t,
+      );
+    }
     const updated = await updateCollectionRow(
       collection.id,
       {

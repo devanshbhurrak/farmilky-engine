@@ -1,6 +1,11 @@
 import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
 import { db } from '../../shared/db/client.js';
-import { milkCollections, transactionSettlements, transactions } from '../../shared/db/schema/index.js';
+import {
+  milkCollections,
+  suppliers,
+  transactionSettlements,
+  transactions,
+} from '../../shared/db/schema/index.js';
 import type { DBOrTx } from '../../shared/types/index.js';
 
 export interface NewCollectionRow {
@@ -9,6 +14,38 @@ export interface NewCollectionRow {
   session: 'morning' | 'evening';
   expectedQty?: string;
   ratePerLiter?: string;
+}
+
+/**
+ * Shape returned to the frontend: camelCase aliases that match the
+ * `MilkCollection` type in `farmilky-management-v2/src/types/supplier.ts`.
+ * Numeric columns are returned as strings by Drizzle (numeric type);
+ * the service layer converts them to numbers via `mapCollectionRow`.
+ */
+export interface CollectionRow {
+  id: string;
+  supplierId: string;
+  supplierName: string | null;
+  date: string;
+  session: 'morning' | 'evening';
+  expectedQty: string | null;
+  actualQty: string | null;
+  fatContent: string | null;
+  snf: string | null;
+  ratePerLiter: string | null;
+  status: 'pending' | 'confirmed';
+  confirmedById?: string | null;
+  confirmedAt?: Date | null;
+  notes: string | null;
+  createdAt: Date;
+  updatedAt?: Date;
+}
+
+/** Subset returned by the history query (no confirmed-by/at or updatedAt). */
+export interface HistoryCollectionRow extends CollectionRow {
+  confirmedById: string | null;
+  confirmedAt: Date | null;
+  updatedAt: Date;
 }
 
 export async function findCollectionById(collectionId: string, tenantId: string, dbOrTx: DBOrTx = db) {
@@ -82,10 +119,32 @@ export async function updateCollectionRow(
   return updated ?? null;
 }
 
-export async function listCollectionsByDate(tenantId: string, collectionDate: string, dbOrTx: DBOrTx = db) {
+export async function listCollectionsByDate(
+  tenantId: string,
+  collectionDate: string,
+  dbOrTx: DBOrTx = db,
+): Promise<CollectionRow[]> {
   return (dbOrTx as typeof db)
-    .select()
+    .select({
+      id: milkCollections.id,
+      supplierId: milkCollections.supplierId,
+      supplierName: suppliers.name,
+      date: milkCollections.collectionDate,
+      session: milkCollections.session,
+      expectedQty: milkCollections.expectedQty,
+      actualQty: milkCollections.actualQty,
+      fatContent: milkCollections.fatContent,
+      snf: milkCollections.snf,
+      ratePerLiter: milkCollections.ratePerLiter,
+      status: milkCollections.status,
+      confirmedById: milkCollections.confirmedById,
+      confirmedAt: milkCollections.confirmedAt,
+      notes: milkCollections.notes,
+      createdAt: milkCollections.createdAt,
+      updatedAt: milkCollections.updatedAt,
+    })
     .from(milkCollections)
+    .leftJoin(suppliers, eq(milkCollections.supplierId, suppliers.id))
     .where(and(eq(milkCollections.tenantId, tenantId), eq(milkCollections.collectionDate, collectionDate)))
     .orderBy(milkCollections.supplierId, milkCollections.session);
 }
@@ -128,8 +187,23 @@ export async function listCollectionHistory(
   if (filters.endDate) conds.push(lte(milkCollections.collectionDate, filters.endDate));
 
   const rows = await (dbOrTx as typeof db)
-    .select()
+    .select({
+      id: milkCollections.id,
+      supplierId: milkCollections.supplierId,
+      supplierName: suppliers.name,
+      date: milkCollections.collectionDate,
+      session: milkCollections.session,
+      expectedQty: milkCollections.expectedQty,
+      actualQty: milkCollections.actualQty,
+      fatContent: milkCollections.fatContent,
+      snf: milkCollections.snf,
+      ratePerLiter: milkCollections.ratePerLiter,
+      status: milkCollections.status,
+      notes: milkCollections.notes,
+      createdAt: milkCollections.createdAt,
+    })
     .from(milkCollections)
+    .leftJoin(suppliers, eq(milkCollections.supplierId, suppliers.id))
     .where(and(...conds))
     .orderBy(desc(milkCollections.collectionDate), milkCollections.session)
     .limit(pagination.limit)

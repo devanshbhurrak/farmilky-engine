@@ -28,7 +28,7 @@ export const createProductSchema = z.object({
   unit: unitSchema.default('L'),
   fatContent: z.number().min(0).optional(),
   stock: z.number().int().min(0).default(0),
-  imageUrl: z.string().optional(),
+  imageUrl: z.string().nullable().optional(),
   isAvailable: z.boolean().default(true),
   sortOrder: z.number().int().default(0),
   variants: z.array(variantSchema).optional(),

@@ -3,6 +3,7 @@ import { withTransaction } from '../../shared/db/transaction.js';
 import { AppError } from '../../shared/middleware/errorHandler.js';
 import type { DBOrTx, DrizzleTx } from '../../shared/types/index.js';
 import { toDateOnlyString } from '../../shared/utils/dateUtils.js';
+import { deleteImageByUrl, isR2Url } from '../../shared/storage/r2.js';
 import type { CreateProductInput, UpdateProductInput, UpdateVariantInput } from './product.schema.js';
 import {
   countProducts,
@@ -110,7 +111,24 @@ export async function createProduct(tenantId: string, input: CreateProductInput,
       },
       t,
     );
-    const variants = normalizeDefaults(input.variants ?? []);
+    let variants = normalizeDefaults(input.variants ?? []);
+    if (variants.length === 0) {
+      // Auto-create a default variant from product-level properties so every
+      // product is subscribable / orderable (those flows require at least one
+      // variant for pricing, labeling and quantity).
+      variants = [
+        {
+          label: input.name,
+          quantity: 1,
+          unit: input.unit ?? 'L',
+          price: input.basePrice ?? 0,
+          stock: input.stock ?? 0,
+          isDefault: true,
+          isAvailable: input.isAvailable ?? true,
+          sortOrder: 0,
+        },
+      ];
+    }
     const created = await createVariantRows(tenantId, product.id, variants, t);
     return { ...product, variants: created };
   };
@@ -128,9 +146,19 @@ export async function updateProduct(
     const existing = await findProductById(tenantId, productId, t);
     if (!existing) throw new AppError('Product not found', 404);
 
+    const imageChanged =
+      input.imageUrl !== undefined && input.imageUrl !== existing.imageUrl;
+
     const { variants, ...fields } = input;
     const updated = await updateProductRow(tenantId, productId, stripUndefined(fields as Record<string, unknown>) as Parameters<typeof updateProductRow>[2], t);
     if (!updated) throw new AppError('Product not found', 404);
+
+    const oldImageUrl = existing.imageUrl;
+    if (imageChanged && oldImageUrl && isR2Url(oldImageUrl)) {
+      await deleteImageByUrl(oldImageUrl).catch((err: Error) => {
+        console.error("[product] Failed to delete old R2 image:", err.message);
+      });
+    }
 
     let variantRows = await findVariantsByProductId(tenantId, productId, t);
     if (variants !== undefined) {
@@ -180,6 +208,25 @@ export async function updateProduct(
       await deleteVariantsExcluding(tenantId, productId, keepIds, t);
       variantRows = await findVariantsByProductId(tenantId, productId, t);
     }
+    // Safety net: if the product ends up with no variants (e.g. an admin
+    // cleared the entire variant list), auto-create a default variant from
+    // the product's own properties so it remains usable for subscriptions
+    // and orders.
+    if (variantRows.length === 0) {
+      const createdDefault = await createVariantRows(tenantId, productId, [
+        {
+          label: updated.name,
+          quantity: 1,
+          unit: updated.unit,
+          price: updated.basePrice ?? 0,
+          stock: updated.stock ?? 0,
+          isDefault: true,
+          isAvailable: updated.isAvailable ?? true,
+          sortOrder: 0,
+        },
+      ], t);
+      variantRows = createdDefault;
+    }
     return { ...updated, variants: variantRows };
   };
   if (tx) return run(tx);
@@ -188,8 +235,19 @@ export async function updateProduct(
 
 export async function deleteProduct(tenantId: string, productId: string, tx?: DrizzleTx) {
   const run = async (t: DBOrTx) => {
+    const existing = await findProductById(tenantId, productId, t);
+    if (!existing) throw new AppError('Product not found', 404);
+
     const row = await softDeleteProductRow(tenantId, productId, t);
     if (!row) throw new AppError('Product not found', 404);
+
+    const deleteImageUrl = existing.imageUrl ?? undefined;
+    if (deleteImageUrl && isR2Url(deleteImageUrl)) {
+      await deleteImageByUrl(deleteImageUrl).catch((err: Error) => {
+        console.error("[product] Failed to delete R2 image on product delete:", err.message);
+      });
+    }
+
     return row;
   };
   if (tx) return run(tx);

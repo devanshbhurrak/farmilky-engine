@@ -12,6 +12,7 @@ import {
 } from '../../shared/utils/dateUtils.js';
 import { getHolidayDateSet } from '../holidays/holiday.service.js';
 import {
+  createVariantRows,
   findProductById,
   findVariantById,
   findVariantsByProductId,
@@ -38,14 +39,18 @@ import {
   insertDelivery,
   insertSubscription,
   insertSubscriptionChange,
+  insertSubscriptionSlots,
   listActiveSubscriptionsByUser,
   listActiveSubscriptionsDue,
   listDeliveriesBySubscription,
   listFutureDeliveriesFrom,
   listSubscriptionChanges,
+  listSubscriptionSlots,
+  listSubscriptionSlotsForSubs,
   listSubscriptionsAdmin,
   listSubscriptionsByUser,
   updateSubscriptionRow,
+  updateSubscriptionSlotQty,
 } from './subscription.repository.js';
 import type {
   AdminCreateSubscriptionInput,
@@ -83,6 +88,71 @@ async function loadSubscription(tenantId: string, id: string, dbOrTx: DBOrTx) {
   const sub = await findSubscriptionById(tenantId, id, dbOrTx);
   if (!sub) throw new AppError('Subscription not found', 404);
   return sub;
+}
+
+type DeliverySlot = 'morning' | 'evening';
+type SlotConfig = { slot: DeliverySlot; qty: number };
+
+/**
+ * Normalize slot configuration for create: accepts either the new
+ * `deliverySlots` array (per-slot quantities) or the legacy single
+ * `deliverySlot` + top-level quantity. Returns slots in input order; the
+ * first entry becomes the subscription's primary slot.
+ */
+function resolveSlotConfig(input: {
+  deliverySlot?: DeliverySlot;
+  deliverySlots?: Array<{ slot: DeliverySlot; quantityPerDelivery?: number }>;
+  quantityPerDelivery: number;
+}): SlotConfig[] {
+  if (input.deliverySlots?.length) {
+    const seen = new Set<string>();
+    return input.deliverySlots.map((entry) => {
+      if (seen.has(entry.slot)) throw new AppError(`Duplicate slot: ${entry.slot}`, 422);
+      seen.add(entry.slot);
+      return { slot: entry.slot, qty: entry.quantityPerDelivery ?? input.quantityPerDelivery };
+    });
+  }
+  if (!input.deliverySlot) {
+    throw new AppError('deliverySlot or deliverySlots is required', 422);
+  }
+  return [{ slot: input.deliverySlot, qty: input.quantityPerDelivery }];
+}
+
+/**
+ * Resolve the effective slot configuration for an existing subscription,
+ * falling back to the legacy row values when no child rows exist yet.
+ */
+async function loadSlotConfig(
+  tenantId: string,
+  sub: Subscription,
+  dbOrTx: DBOrTx,
+): Promise<SlotConfig[]> {
+  const rows = await listSubscriptionSlots(tenantId, sub.id, dbOrTx);
+  if (rows.length > 0) {
+    return rows.map((r) => ({
+      slot: r.deliverySlot as DeliverySlot,
+      qty: num(r.quantityPerDelivery),
+    }));
+  }
+  return [{ slot: sub.deliverySlot as DeliverySlot, qty: num(sub.quantityPerDelivery) }];
+}
+
+async function syncSingleSlotQuantity(
+  tenantId: string,
+  sub: Subscription,
+  qty: number,
+  dbOrTx: DBOrTx,
+) {
+  const rows = await listSubscriptionSlots(tenantId, sub.id, dbOrTx);
+  if (rows.length === 1) {
+    await updateSubscriptionSlotQty(tenantId, sub.id, rows[0].deliverySlot, String(qty), dbOrTx);
+  } else if (rows.length === 0) {
+    await insertSubscriptionSlots(
+      tenantId,
+      [{ subscriptionId: sub.id, deliverySlot: sub.deliverySlot, quantityPerDelivery: String(qty) }],
+      dbOrTx,
+    );
+  }
 }
 
 function assertOwnerOrAdmin(sub: Subscription, requesterId: string | undefined, isAdmin: boolean) {
@@ -132,6 +202,24 @@ async function resolveSubscriptionVariant(
     return { product, variant };
   }
   const variants = await findVariantsByProductId(tenantId, productId, dbOrTx);
+  if (variants.length === 0) {
+    // Lazy migration: products created before the variant requirement may
+    // have no variant rows. Auto-create a default variant from the product's
+    // own properties so subscriptions can still be created.
+    const created = await createVariantRows(tenantId, productId, [
+      {
+        label: product.name,
+        quantity: 1,
+        unit: product.unit,
+        price: product.basePrice ?? 0,
+        stock: product.stock ?? 0,
+        isDefault: true,
+        isAvailable: true,
+        sortOrder: 0,
+      },
+    ], dbOrTx);
+    return { product, variant: created[0] };
+  }
   const variant = variants.find((v) => v.isDefault) ?? variants[0];
   if (!variant) throw new AppError('No variants available for product', 404);
   return { product, variant };
@@ -190,12 +278,21 @@ function isChargeableOutcome(status: string): boolean {
   return status === 'delivered' || status === 'partial' || status === 'extra';
 }
 
-function snapshotOf(sub: Subscription): Record<string, unknown> {
+function snapshotOf(
+  sub: Subscription,
+  slots?: Array<{ deliverySlot: string; quantityPerDelivery: string }>,
+): Record<string, unknown> {
   return {
     productId: sub.productId,
     variantId: sub.variantId,
     quantityPerDelivery: sub.quantityPerDelivery,
     deliverySlot: sub.deliverySlot,
+    deliverySlots: slots?.length
+      ? slots.map((s) => ({
+          slot: s.deliverySlot,
+          quantityPerDelivery: num(s.quantityPerDelivery),
+        }))
+      : undefined,
     deliverySchedule: sub.deliverySchedule,
     customDays: sub.customDays,
     startDate: sub.startDate,
@@ -241,7 +338,10 @@ export async function createSubscription(
     const nextDeliveryDate = toDateOnlyString(
       calculateNextDeliveryDate({ deliverySchedule: schedule, customDays }, startDate, holidays),
     );
-    const qty = input.quantityPerDelivery;
+    const slotConfig = resolveSlotConfig(input);
+    // Row-level quantity is the daily total across slots; per-slot
+    // quantities live on the subscription_slots rows.
+    const qty = round2(slotConfig.reduce((sum, s) => sum + s.qty, 0));
     const total = round2(qty * price);
 
     const sub = await insertSubscription(
@@ -255,7 +355,7 @@ export async function createSubscription(
         variantUnit: variant.unit,
         variantQuantity: String(variant.quantity),
         quantityPerDelivery: String(qty),
-        deliverySlot: input.deliverySlot,
+        deliverySlot: slotConfig[0].slot,
         deliverySchedule: schedule,
         customDays,
         startDate,
@@ -269,7 +369,16 @@ export async function createSubscription(
       },
       t,
     );
-    await audit(tenantId, sub.id, 'created', {}, snapshotOf(sub), {
+    const slotRows = await insertSubscriptionSlots(
+      tenantId,
+      slotConfig.map((s) => ({
+        subscriptionId: sub.id,
+        deliverySlot: s.slot,
+        quantityPerDelivery: String(s.qty),
+      })),
+      t,
+    );
+    await audit(tenantId, sub.id, 'created', {}, snapshotOf(sub, slotRows), {
       changedById: adminId ?? userId,
     }, t);
     return sub;
@@ -306,10 +415,28 @@ export async function recordDeliveryOutcome(
       throw new AppError('Only active subscriptions can be billed for a delivery', 409);
     }
 
+    // Resolve which slot this outcome belongs to and its scheduled quantity.
+    // Single-slot subscriptions default to their only slot; multi-slot ones
+    // require an explicit `slot`.
+    const slotConfig = await loadSlotConfig(tenantId, sub, t);
+    let slot: DeliverySlot;
+    if (params.slot) {
+      if (!slotConfig.some((c) => c.slot === params.slot)) {
+        throw new AppError(`Subscription is not configured for the ${params.slot} slot`, 422);
+      }
+      slot = params.slot;
+    } else if (slotConfig.length === 1) {
+      slot = slotConfig[0].slot;
+    } else {
+      throw new AppError('Multiple slots configured — specify `slot` (morning or evening)', 422);
+    }
+    const slotQty = slotConfig.find((c) => c.slot === slot)!.qty;
+
     const existing = await findDeliveryBySubscriptionAndDate(
       tenantId,
       subscriptionId,
       params.deliveryDate,
+      slot,
       t,
     );
     if (existing) {
@@ -348,17 +475,16 @@ export async function recordDeliveryOutcome(
         throw new AppError('actualQuantity must be positive for partial/extra outcomes', 422);
       }
       qty = params.actualQuantity;
-      // Quantity bounds against the scheduled quantity: partial must be
-      // strictly less than scheduled; extra has a 3x ceiling.
-      const scheduledQty = num(sub.quantityPerDelivery);
-      if (params.status === 'partial' && qty >= scheduledQty) {
+      // Quantity bounds against the scheduled quantity for this slot: partial
+      // must be strictly less than scheduled; extra has a 3x ceiling.
+      if (params.status === 'partial' && qty >= slotQty) {
         throw new AppError('Partial delivery quantity must be less than scheduled', 422);
       }
-      if (params.status === 'extra' && qty > scheduledQty * 3) {
+      if (params.status === 'extra' && qty > slotQty * 3) {
         throw new AppError('Extra delivery quantity exceeds allowed ceiling', 422);
       }
     } else if (params.status === 'delivered') {
-      qty = num(sub.quantityPerDelivery);
+      qty = slotQty;
     } else {
       qty = 0;
     }
@@ -371,9 +497,9 @@ export async function recordDeliveryOutcome(
       {
         subscriptionId,
         deliveryDate: params.deliveryDate,
-        deliverySlot: sub.deliverySlot,
+        deliverySlot: slot,
         status: params.status,
-        scheduledQuantity: String(sub.quantityPerDelivery),
+        scheduledQuantity: String(slotQty),
         actualQuantity: isZero ? '0' : String(qty),
         pricePerPacket: sub.pricePerPacket,
         totalAmount: amount.toFixed(2),
@@ -463,6 +589,7 @@ export async function recordAgentDeliveryOutcome(
       deliveryDate: input.deliveryDate ?? todayStr(),
       status: input.status,
       notes: input.notes,
+      ...(input.slot ? { slot: input.slot } : {}),
       ...(input.reason ? { reason: input.reason } : {}),
     },
     actorId,
@@ -570,6 +697,22 @@ export async function scheduleSubscriptionChange(
     if (!(input.effectiveDate > todayStr())) {
       throw new AppError('effectiveDate must be in the future', 422);
     }
+    // scheduledQty targets one slot. Single-slot subscriptions default to
+    // their only slot; multi-slot ones must specify which one.
+    let scheduledSlot: DeliverySlot | null = null;
+    if (input.scheduledQty !== undefined) {
+      const slotConfig = await loadSlotConfig(tenantId, sub, t);
+      if (input.slot) {
+        if (!slotConfig.some((c) => c.slot === input.slot)) {
+          throw new AppError(`Subscription is not configured for the ${input.slot} slot`, 422);
+        }
+        scheduledSlot = input.slot;
+      } else if (slotConfig.length === 1) {
+        scheduledSlot = slotConfig[0].slot;
+      } else {
+        throw new AppError('Multiple slots configured — specify `slot` for scheduledQty', 422);
+      }
+    }
     const updated = await updateSubscriptionRow(
       tenantId,
       subscriptionId,
@@ -580,6 +723,7 @@ export async function scheduleSubscriptionChange(
           input.scheduledPrice !== undefined
             ? round2(input.scheduledPrice).toFixed(2)
             : sub.scheduledPrice,
+        scheduledSlot: input.scheduledQty !== undefined ? scheduledSlot : sub.scheduledSlot,
         scheduledChangeDate: input.effectiveDate,
       },
       t,
@@ -591,11 +735,13 @@ export async function scheduleSubscriptionChange(
       {
         scheduledQty: sub.scheduledQty,
         scheduledPrice: sub.scheduledPrice,
+        scheduledSlot: sub.scheduledSlot,
         scheduledChangeDate: sub.scheduledChangeDate,
       },
       {
         scheduledQty: updated!.scheduledQty,
         scheduledPrice: updated!.scheduledPrice,
+        scheduledSlot: updated!.scheduledSlot,
         scheduledChangeDate: updated!.scheduledChangeDate,
       },
       { effectiveDate: input.effectiveDate, changedById: actorId },
@@ -618,7 +764,7 @@ export async function cancelScheduledChange(
     const updated = await updateSubscriptionRow(
       tenantId,
       subscriptionId,
-      { scheduledQty: null, scheduledPrice: null, scheduledChangeDate: null },
+      { scheduledQty: null, scheduledPrice: null, scheduledSlot: null, scheduledChangeDate: null },
       t,
     );
     await audit(
@@ -628,9 +774,10 @@ export async function cancelScheduledChange(
       {
         scheduledQty: sub.scheduledQty,
         scheduledPrice: sub.scheduledPrice,
+        scheduledSlot: sub.scheduledSlot,
         scheduledChangeDate: sub.scheduledChangeDate,
       },
-      { scheduledQty: null, scheduledPrice: null, scheduledChangeDate: null },
+      { scheduledQty: null, scheduledPrice: null, scheduledSlot: null, scheduledChangeDate: null },
       { reason: 'Scheduled change cancelled', changedById: actorId },
       t,
     );
@@ -974,7 +1121,16 @@ export async function updateSubscriptionSchedule(
     assertOwnerOrAdmin(sub, requesterId, isAdmin);
     const patch: Partial<Subscription> = {};
     if (input.quantityPerDelivery !== undefined) {
+      const slotRows = await listSubscriptionSlots(tenantId, subscriptionId, t);
+      if (slotRows.length > 1) {
+        throw new AppError(
+          'Multi-slot subscriptions must update quantities per slot via the admin update endpoint',
+          422,
+        );
+      }
       patch.quantityPerDelivery = String(input.quantityPerDelivery);
+      // Keep the per-slot row in sync with the row-level quantity.
+      await syncSingleSlotQuantity(tenantId, sub, input.quantityPerDelivery, t);
     }
     if (input.deliverySchedule !== undefined) {
       patch.deliverySchedule = input.deliverySchedule as Subscription['deliverySchedule'];
@@ -1082,8 +1238,44 @@ export async function adminUpdateSubscription(
       patch.pricePerPacket = price.toFixed(2);
       patch.isCustomPrice = isCustom;
     }
-    if (input.quantityPerDelivery !== undefined) {
+    // Per-slot quantity updates (multi-slot) or single-slot quantity sync.
+    if (input.deliverySlots?.length) {
+      const existingSlots = await listSubscriptionSlots(tenantId, subscriptionId, t);
+      const existingSet = new Set(existingSlots.map((r) => r.deliverySlot));
+      const inputSet = new Set(input.deliverySlots.map((s) => s.slot));
+      const sameSet =
+        existingSet.size === inputSet.size && [...inputSet].every((s) => existingSet.has(s));
+      if (!sameSet) {
+        throw new AppError(
+          'Delivery slots cannot be changed. Cancel and recreate the subscription to change the slots.',
+          422,
+        );
+      }
+      for (const entry of input.deliverySlots) {
+        if (entry.quantityPerDelivery !== undefined) {
+          await updateSubscriptionSlotQty(
+            tenantId,
+            subscriptionId,
+            entry.slot,
+            String(entry.quantityPerDelivery),
+            t,
+          );
+        }
+      }
+      const fresh = await listSubscriptionSlots(tenantId, subscriptionId, t);
+      const totalQty = round2(fresh.reduce((sum, r) => sum + num(r.quantityPerDelivery), 0));
+      patch.quantityPerDelivery = String(totalQty);
+    } else if (input.quantityPerDelivery !== undefined) {
+      const existingSlots = await listSubscriptionSlots(tenantId, subscriptionId, t);
+      if (existingSlots.length > 1) {
+        throw new AppError(
+          'Multi-slot subscriptions must update quantities per slot via deliverySlots',
+          422,
+        );
+      }
       patch.quantityPerDelivery = String(input.quantityPerDelivery);
+      // Keep the per-slot row in sync with the row-level quantity.
+      await syncSingleSlotQuantity(tenantId, sub, input.quantityPerDelivery, t);
     }
     if (input.deliverySlot !== undefined) patch.deliverySlot = input.deliverySlot;
     if (input.deliverySchedule !== undefined) {
@@ -1189,11 +1381,12 @@ export async function getSubscriptionById(
 ) {
   const sub = await loadSubscription(tenantId, subscriptionId, dbOrTx);
   assertOwnerOrAdmin(sub, requester.id, requester.isAdmin);
-  const [deliveries, changes] = await Promise.all([
+  const [slots, deliveries, changes] = await Promise.all([
+    listSubscriptionSlots(tenantId, subscriptionId, dbOrTx),
     listDeliveriesBySubscription(tenantId, subscriptionId, dbOrTx),
     listSubscriptionChanges(tenantId, subscriptionId, dbOrTx),
   ]);
-  return { ...sub, deliveries, changes };
+  return { ...sub, slots, deliveries, changes };
 }
 
 export async function listSubscriptionsAdminService(
@@ -1222,17 +1415,40 @@ export async function getTodaySupply(
   );
   const holidays = await getHolidayDateSet(tenantId, dbOrTx);
   const due = candidates.filter((s) => isSubscriptionDueOnDate(s, date, holidays));
-  const totalQuantity = round2(due.reduce((sum, s) => sum + num(s.quantityPerDelivery), 0));
+  // Multi-slot aware: aggregate per-slot quantities from the authoritative
+  // subscription_slots rows (filtered to the requested slot when given).
+  const slotRows = await listSubscriptionSlotsForSubs(
+    tenantId,
+    due.map((s) => s.id),
+    dbOrTx,
+  );
+  const slotsBySub = new Map<string, Array<{ slot: DeliverySlot; quantityPerDelivery: number }>>();
+  for (const row of slotRows) {
+    if (opts.slot && row.deliverySlot !== opts.slot) continue;
+    const list = slotsBySub.get(row.subscriptionId) ?? [];
+    list.push({
+      slot: row.deliverySlot as DeliverySlot,
+      quantityPerDelivery: num(row.quantityPerDelivery),
+    });
+    slotsBySub.set(row.subscriptionId, list);
+  }
   const bySlot = {
     morning: { count: 0, quantity: 0 },
     evening: { count: 0, quantity: 0 },
   };
-  for (const s of due) {
-    const slot = s.deliverySlot as 'morning' | 'evening';
-    bySlot[slot].count += 1;
-    bySlot[slot].quantity = round2(bySlot[slot].quantity + num(s.quantityPerDelivery));
-  }
-  return { date, count: due.length, totalQuantity, bySlot, items: due };
+  let totalQuantity = 0;
+  const items = due.map((s) => {
+    const slots =
+      slotsBySub.get(s.id) ??
+      (opts.slot ? [] : [{ slot: s.deliverySlot as DeliverySlot, quantityPerDelivery: num(s.quantityPerDelivery) }]);
+    for (const entry of slots) {
+      bySlot[entry.slot].count += 1;
+      bySlot[entry.slot].quantity = round2(bySlot[entry.slot].quantity + entry.quantityPerDelivery);
+      totalQuantity = round2(totalQuantity + entry.quantityPerDelivery);
+    }
+    return { ...s, slots };
+  });
+  return { date, count: due.length, totalQuantity, bySlot, items };
 }
 
 export async function getDeliveryBoard(

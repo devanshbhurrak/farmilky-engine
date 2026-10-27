@@ -409,6 +409,128 @@ dbOnly('subscriptions – tenant isolation', () => {
   });
 });
 
+// ─── products without variants ────────────────────────────────────────────────
+
+dbOnly('subscriptions – product without variants', () => {
+  it('createProduct auto-creates a default variant when none are provided', async () => {
+    const { createProduct } = await import('../../modules/products/product.service.js');
+    const { findVariantsByProductId } = await import(
+      '../../modules/products/product.repository.js'
+    );
+
+    const slug = tenantSlug();
+    const reg = await setupTenant(slug);
+    const tenantId = reg.tenant.id;
+
+    const product = await createProduct(tenantId, {
+      name: 'A2 Desi Cow Milk',
+      category: 'milk',
+      basePrice: 60,
+      unit: 'L',
+      stock: 0,
+    } as never);
+
+    const variants = await findVariantsByProductId(tenantId, product.id);
+    expect(variants).toHaveLength(1);
+    expect(variants[0].isDefault).toBe(true);
+    expect(variants[0].label).toBe('A2 Desi Cow Milk');
+    expect(Number(variants[0].price)).toBe(60);
+  });
+
+  it('subscription creation works for a product with only an auto-created default variant', async () => {
+    const { createSubscription } = await import(
+      '../../modules/subscriptions/subscription.service.js'
+    );
+
+    const slug = tenantSlug();
+    const reg = await setupTenant(slug);
+    const tenantId = reg.tenant.id;
+    const adminId = (reg.admin as { id: string }).id;
+    const cust = await setupCustomer(slug, '9123000099');
+    const userId = cust.user.id as string;
+
+    const { createProduct } = await import('../../modules/products/product.service.js');
+    const product = await createProduct(tenantId, {
+      name: 'A2 Desi Cow Milk',
+      category: 'milk',
+      basePrice: 60,
+      unit: 'L',
+    } as never);
+
+    // Create subscription WITHOUT specifying variantId — the scenario that
+    // previously threw "No variants available for product".
+    const sub = await createSubscription(
+      tenantId,
+      userId,
+      {
+        productId: product.id,
+        quantityPerDelivery: 1,
+        deliverySlot: 'morning',
+      } as never,
+      adminId,
+    );
+
+    expect(sub.id).toBeDefined();
+    expect(sub.variantId).toBeDefined();
+    expect(Number(sub.pricePerPacket)).toBe(60);
+  });
+
+  it('lazy migration: subscription creation auto-creates variant for legacy product with no variants', async () => {
+    const { createProduct } = await import('../../modules/products/product.service.js');
+    const { createSubscription } = await import(
+      '../../modules/subscriptions/subscription.service.js'
+    );
+    const { findVariantsByProductId } = await import(
+      '../../modules/products/product.repository.js'
+    );
+    const { db } = await import('../../shared/db/client.js');
+    const { productVariants } = await import('../../shared/db/schema/index.js');
+    const { and, eq } = await import('drizzle-orm');
+
+    const slug = tenantSlug();
+    const reg = await setupTenant(slug);
+    const tenantId = reg.tenant.id;
+    const adminId = (reg.admin as { id: string }).id;
+    const cust = await setupCustomer(slug, '9123000098');
+    const userId = cust.user.id as string;
+
+    // Create a product (auto-creates a default variant)
+    const product = await createProduct(tenantId, {
+      name: 'Legacy Milk',
+      category: 'milk',
+      basePrice: 50,
+      unit: 'L',
+    } as never);
+
+    // Simulate legacy data: delete ALL variants so the product has none
+    await db.delete(productVariants).where(
+      and(eq(productVariants.tenantId, tenantId), eq(productVariants.productId, product.id)),
+    );
+
+    const beforeVariants = await findVariantsByProductId(tenantId, product.id);
+    expect(beforeVariants).toHaveLength(0);
+
+    // Subscription creation should auto-create a default variant (lazy migration)
+    const sub = await createSubscription(
+      tenantId,
+      userId,
+      {
+        productId: product.id,
+        quantityPerDelivery: 1,
+        deliverySlot: 'morning',
+      } as never,
+      adminId,
+    );
+
+    expect(sub.id).toBeDefined();
+    expect(sub.variantId).toBeDefined();
+
+    const afterVariants = await findVariantsByProductId(tenantId, product.id);
+    expect(afterVariants).toHaveLength(1);
+    expect(afterVariants[0].isDefault).toBe(true);
+  });
+});
+
 describe('subscriptions (no db)', () => {
   it('placeholder passes without DATABASE_URL', () => {
     expect(true).toBe(true);

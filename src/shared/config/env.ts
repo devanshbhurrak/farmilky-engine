@@ -28,6 +28,11 @@ export const env = {
   get allowedOrigins(): string[] { return parseOrigins(); },
   get backendUrl(): string { return process.env.BACKEND_URL ?? ''; },
   get bcryptRounds(): number { return Number(process.env.BCRYPT_ROUNDS ?? 12); },
+  get r2AccountId(): string | undefined { return process.env.R2_ACCOUNT_ID || undefined; },
+  get r2AccessKeyId(): string | undefined { return process.env.R2_ACCESS_KEY_ID || undefined; },
+  get r2SecretAccessKey(): string | undefined { return process.env.R2_SECRET_ACCESS_KEY || undefined; },
+  get r2BucketName(): string | undefined { return process.env.R2_BUCKET_NAME || undefined; },
+  get r2PublicUrl(): string | undefined { return process.env.R2_PUBLIC_URL || undefined; },
 };
 
 export const isProd = (): boolean => env.nodeEnv === 'production';

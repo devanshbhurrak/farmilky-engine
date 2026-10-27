@@ -5,14 +5,14 @@ import { AppError } from '../../shared/middleware/errorHandler.js';
 import { sseManager } from '../../shared/realtime/sseManager.js';
 import { logger } from '../../shared/utils/logger.js';
 import type { DBOrTx, DrizzleTx } from '../../shared/types/index.js';
-import { addDays, istToday, normalizeDate, toDateOnlyString } from '../../shared/utils/dateUtils.js';
+import { addDays, istToday, normalizeDate, round2, toDateOnlyString } from '../../shared/utils/dateUtils.js';
 import { listPendingForDateSlot, recordDeliveryOutcome as recordOrderOutcome } from '../orders/order.service.js';
 import { getHolidayDateSet } from '../holidays/holiday.service.js';
 import {
   isSubscriptionDueOnDate,
   recordDeliveryOutcome as recordSubscriptionOutcome,
 } from '../subscriptions/subscription.service.js';
-import { listActiveSubscriptionsDue } from '../subscriptions/subscription.repository.js';
+import { listActiveSubscriptionsDue, listSubscriptionSlotsForSubs } from '../subscriptions/subscription.repository.js';
 import type { UpdateEntryInput } from './manifest.schema.js';
 import {
   countPending,
@@ -116,6 +116,21 @@ async function generateManifestsForDateInner(
   const dueSubs = candidates.filter((s) => isSubscriptionDueOnDate(s, date, holidays));
   const pendingOrders = await listPendingForDateSlot(tenantId, date, slot, dbOrTx);
 
+  // Per-slot quantities for this slot: a subscription may deliver in both
+  // slots with different quantities; the sheet shows the slot's own amount.
+  const slotQtyBySub = new Map<string, number>();
+  if (dueSubs.length > 0) {
+    const slotRows = await listSubscriptionSlotsForSubs(
+      tenantId,
+      dueSubs.map((s) => s.id),
+      dbOrTx,
+    );
+    for (const row of slotRows) {
+      if (row.deliverySlot !== slot) continue;
+      slotQtyBySub.set(row.subscriptionId, Number(row.quantityPerDelivery));
+    }
+  }
+
   const userIds = [
     ...new Set([...dueSubs.map((s) => s.userId), ...pendingOrders.map((o) => o.userId)]),
   ];
@@ -155,6 +170,7 @@ async function generateManifestsForDateInner(
     const customer = userMap.get(sub.userId);
     const addr = addressMap.get(sub.userId);
     const product = productMap.get(sub.productId);
+    const slotQty = slotQtyBySub.get(sub.id) ?? Number(sub.quantityPerDelivery);
     pushDraft(sub.areaId ?? customer?.assignedAreaId ?? null, {
       entryType: 'subscription',
       referenceId: sub.id,
@@ -165,9 +181,9 @@ async function generateManifestsForDateInner(
       phone: customer?.phone ?? null,
       address: joinAddress([addr?.street, addr?.city, addr?.pincode]),
       productLabel: `${product?.name ?? 'Unknown'}${sub.variantLabel ? ` (${sub.variantLabel})` : ''}`,
-      quantity: String(sub.quantityPerDelivery),
+      quantity: String(slotQty),
       unit: sub.variantUnit ?? product?.unit ?? 'unit',
-      amount: sub.totalPricePerDelivery,
+      amount: round2(slotQty * Number(sub.pricePerPacket)).toFixed(2),
     });
   }
 
@@ -323,6 +339,7 @@ export async function updateManifestEntry(
         tenantId,
         {
           deliveryDate: manifest.manifestDate,
+          slot: manifest.deliverySlot,
           status: data.status,
           ...(data.actualQuantity !== undefined ? { actualQuantity: data.actualQuantity } : {}),
           ...(reason ? { reason } : {}),
