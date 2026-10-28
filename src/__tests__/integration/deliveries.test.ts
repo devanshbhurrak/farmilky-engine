@@ -61,10 +61,10 @@ async function createSubDeliveryContext(slug: string) {
 const { recordDeliveryOutcome, correctDelivery, rescheduleDelivery, cancelDelivery, recordPaymentAgainstDelivery, markMissedDeliveries, getCustomerDeliverySummary } = await import(
   '../../modules/deliveries/delivery.service.js'
 );
-const { toDateOnlyString, istToday } = await import('../../shared/utils/dateUtils.js');
+const { toDateOnlyString, istToday, addDays } = await import('../../shared/utils/dateUtils.js');
 
 dbOnly('deliveries – subscription workflow', () => {
-  it('delivers a subscription delivery, debits balance, and advances next date', async () => {
+  it('delivers a subscription delivery, debits balance', async () => {
     const slug = tenantSlug();
     const { tenantId, adminId, userId, sub } = await createSubDeliveryContext(slug);
     const today = toDateOnlyString(istToday());
@@ -109,7 +109,6 @@ dbOnly('deliveries – subscription workflow', () => {
       { customerId: userId, type: 'subscription', referenceType: 'subscription', referenceId: sub.id, deliveryDate: today, deliverySlot: 'morning', status: 'delivered', idempotencyKey: key },
       adminId,
     );
-    // Duplicate request returns the existing record without a new transaction.
     expect(second.transactionId).toBeNull();
     expect(second.delivery.id).toBe(first.delivery.id);
     expect(await getBalance(userId)).toBe(120);
@@ -127,41 +126,44 @@ dbOnly('deliveries – subscription workflow', () => {
     );
     expect(await getBalance(userId)).toBe(120);
 
-    const delivery = first.delivery;
     const corrected = await correctDelivery(
       tenantId,
-      delivery.id,
+      first.delivery.id,
       { status: 'delivered', actualQuantity: 1, pricePerPacket: 60, reason: 'customer took 1' },
       adminId,
-      Number(delivery.version),
+      Number(first.delivery.version),
     );
 
-    // Old 120 voided, new 60 charged → net 60.
     expect(await getBalance(userId)).toBe(60);
     expect(Number(corrected.delivery.totalAmount)).toBe(60);
     expect(Number(corrected.delivery.actualQuantity)).toBe(1);
   });
 
-  it('cancelling a charged delivery reverses the charge and restores stock', async () => {
+  it('cancelling a charged delivery reverses the charge', async () => {
     const slug = tenantSlug();
-    const { tenantId, adminId, userId, sub, variantId } = await createSubDeliveryContext(slug);
+    const { tenantId, adminId, userId, sub } = await createSubDeliveryContext(slug);
     const today = toDateOnlyString(istToday());
 
-    await recordDeliveryOutcome(
+    const delivered = await recordDeliveryOutcome(
       tenantId,
       { customerId: userId, type: 'subscription', referenceType: 'subscription', referenceId: sub.id, deliveryDate: today, deliverySlot: 'morning', status: 'delivered' },
       adminId,
     );
     expect(await getBalance(userId)).toBe(120);
 
-    const delivery = await (await import('../../modules/deliveries/delivery.repository.js')).findDeliveryById(tenantId, (await recordDeliveryOutcome(tenantId, {
-      customerId: userId, type: 'subscription', referenceType: 'subscription', referenceId: sub.id, deliveryDate: today, deliverySlot: 'morning', status: 'delivered',
-    }, adminId)).delivery.id);
-    // (re-fetch a fresh delivered delivery)
+    const cancelled = await cancelDelivery(
+      tenantId,
+      delivered.delivery.id,
+      { reason: 'customer moved', restock: true },
+      adminId,
+    );
+    expect(cancelled.reversed).toBe(true);
+    expect(cancelled.delivery.status).toBe('skipped');
+    expect(await getBalance(userId)).toBe(0);
   });
 });
 
-dbOnly('deliveries – reschedule, cancel, payment, missed, summary', () => {
+dbOnly('deliveries – reschedule, payment, missed, summary', () => {
   it('reschedule creates a pending record and keeps the original', async () => {
     const slug = tenantSlug();
     const { tenantId, adminId, userId, sub } = await createSubDeliveryContext(slug);
@@ -185,29 +187,6 @@ dbOnly('deliveries – reschedule, cancel, payment, missed, summary', () => {
     expect(rescheduled.delivery.status).toBe('pending');
     expect(rescheduled.delivery.deliveryDate).toBe(tomorrow);
     expect(rescheduled.delivery.rescheduledFromId).toBe(first.delivery.id);
-  });
-
-  it('cancel reverses a charged delivery', async () => {
-    const slug = tenantSlug();
-    const { tenantId, adminId, userId, sub } = await createSubDeliveryContext(slug);
-    const today = toDateOnlyString(istToday());
-
-    const delivered = await recordDeliveryOutcome(
-      tenantId,
-      { customerId: userId, type: 'subscription', referenceType: 'subscription', referenceId: sub.id, deliveryDate: today, deliverySlot: 'morning', status: 'delivered' },
-      adminId,
-    );
-    expect(await getBalance(userId)).toBe(120);
-
-    const cancelled = await cancelDelivery(
-      tenantId,
-      delivered.delivery.id,
-      { reason: 'customer moved', restock: true },
-      adminId,
-    );
-    expect(cancelled.reversed).toBe(true);
-    expect(cancelled.delivery.status).toBe('skipped');
-    expect(await getBalance(userId)).toBe(0);
   });
 
   it('partial payment then full payment marks delivery paid', async () => {
@@ -239,7 +218,6 @@ dbOnly('deliveries – reschedule, cancel, payment, missed, summary', () => {
     );
     expect(full.paymentStatus).toBe('paid');
     expect(full.outstanding).toBe(0);
-    // Net balance: +120 charge -120 paid = 0.
     expect(await getBalance(userId)).toBe(0);
   });
 
