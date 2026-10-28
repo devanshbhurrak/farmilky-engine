@@ -9,6 +9,8 @@ import {
   users,
 } from '../../shared/db/schema/index.js';
 
+export type Order = typeof orders.$inferSelect;
+
 export type OrderStatus = (typeof orders.orderStatus.enumValues)[number];
 export type PaymentStatus = (typeof orders.paymentStatus.enumValues)[number];
 export type DeliverySlot = (typeof orders.deliverySlot.enumValues)[number];
@@ -109,6 +111,24 @@ export async function findOrderItems(orderId: string, dbOrTx: DBOrTx = db) {
     .select()
     .from(orderItems)
     .where(eq(orderItems.orderId, orderId));
+}
+
+export async function findOrderItemsForBoard(
+  _tenantId: string,
+  orderIds: string[],
+  dbOrTx: DBOrTx = db,
+) {
+  if (orderIds.length === 0) return [];
+  return (dbOrTx as typeof db)
+    .select({
+      orderId: orderItems.orderId,
+      quantity: orderItems.quantity,
+      productId: orderItems.productId,
+      productName: orderItems.productName,
+      unit: orderItems.unit,
+    })
+    .from(orderItems)
+    .where(inArray(orderItems.orderId, [...new Set(orderIds)]));
 }
 
 export async function findAttemptsByOrder(orderId: string, dbOrTx: DBOrTx = db) {

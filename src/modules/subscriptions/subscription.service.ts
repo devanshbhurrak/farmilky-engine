@@ -4,6 +4,7 @@ import { AppError } from '../../shared/middleware/errorHandler.js';
 import { logger } from '../../shared/utils/logger.js';
 import type { DBOrTx, DrizzleTx } from '../../shared/types/index.js';
 import {
+  addDays,
   differenceInCalendarDays,
   istToday,
   normalizeDate,
@@ -283,6 +284,17 @@ function isChargeableOutcome(status: string): boolean {
   return status === 'delivered' || status === 'partial' || status === 'extra';
 }
 
+function clearScheduledChangePatch(): Partial<Subscription> {
+  return {
+    scheduledQty: null,
+    scheduledPrice: null,
+    scheduledSlot: null,
+    scheduledDeliverySchedule: null,
+    scheduledCustomDays: null,
+    scheduledChangeDate: null,
+  };
+}
+
 function snapshotOf(
   sub: Subscription,
   slots?: Array<{ deliverySlot: string; quantityPerDelivery: string }>,
@@ -305,6 +317,14 @@ function snapshotOf(
     pricePerPacket: sub.pricePerPacket,
     totalPricePerDelivery: sub.totalPricePerDelivery,
     status: sub.status,
+    scheduledChange: {
+      quantity: sub.scheduledQty,
+      price: sub.scheduledPrice,
+      slot: sub.scheduledSlot,
+      deliverySchedule: sub.scheduledDeliverySchedule,
+      customDays: sub.scheduledCustomDays,
+      effectiveDate: sub.scheduledChangeDate,
+    },
   };
 }
 
@@ -341,7 +361,17 @@ export async function createSubscription(
     const schedule = input.deliverySchedule ?? 'daily';
     const customDays = input.customDays ?? [];
     const nextDeliveryDate = toDateOnlyString(
-      calculateNextDeliveryDate({ deliverySchedule: schedule, customDays }, startDate, holidays),
+      advanceToNextDue(
+        {
+          status: 'active',
+          deliverySchedule: schedule,
+          customDays,
+          startDate,
+          nextDeliveryDate: startDate,
+        },
+        startDate,
+        holidays,
+      ),
     );
     const slotConfig = resolveSlotConfig(input);
     // Row-level quantity is the daily total across slots; per-slot
@@ -412,12 +442,18 @@ export async function recordDeliveryOutcome(
 ) {
   const run = async (t: DrizzleTx) => {
     const sub = await loadSubscription(tenantId, subscriptionId, t);
+    if (params.deliveryDate > todayStr()) {
+      throw new AppError('Delivery outcomes cannot be recorded for a future date', 422);
+    }
     const chargeable =
       params.status === 'delivered' || params.status === 'partial' || params.status === 'extra';
     // Money may only move for active subscriptions. Operational history
     // (skipped/failed) is still recorded so manifests stay accurate.
     if (chargeable && sub.status !== 'active') {
       throw new AppError('Only active subscriptions can be billed for a delivery', 409);
+    }
+    if ((params.status === 'failed' || params.status === 'skipped') && !params.reason?.trim()) {
+      throw new AppError('A reason is required for failed/skipped outcomes', 422);
     }
 
     // Resolve which slot this outcome belongs to and its scheduled quantity.
@@ -436,6 +472,7 @@ export async function recordDeliveryOutcome(
       throw new AppError('Multiple slots configured — specify `slot` (morning or evening)', 422);
     }
     const slotQty = slotConfig.find((c) => c.slot === slot)!.qty;
+    let ledgerChanged = false;
 
     const existing = await findDeliveryBySubscriptionAndDate(
       tenantId,
@@ -460,6 +497,7 @@ export async function recordDeliveryOutcome(
             actorId,
             t,
           );
+          ledgerChanged = true;
         }
         // The old outcome consumed stock — put it back before the new outcome
         // decrements again.
@@ -514,7 +552,6 @@ export async function recordDeliveryOutcome(
       },
       t,
     );
-
     let transactionId: string | null = null;
     if (
       (params.status === 'delivered' || params.status === 'partial' || params.status === 'extra') &&
@@ -548,6 +585,7 @@ export async function recordDeliveryOutcome(
         t,
       );
       transactionId = txn.id;
+      ledgerChanged = true;
       // Mirror orders: decrement inventory on chargeable delivery outcomes
       // (delivered/partial/extra) so subscription stock never drifts.
       await decrementStockForDelivery(tenantId, sub.variantId, sub.productId, qty, t);
@@ -555,8 +593,11 @@ export async function recordDeliveryOutcome(
 
     if (params.deliveryDate >= todayStr()) {
       const holidays = await getHolidayDateSet(tenantId, t);
-      // Skip-aware: next never lands on a holiday, vacation day or skip date.
-      const next = toDateOnlyString(advanceToNextDue(sub, params.deliveryDate, holidays));
+      // Start after the outcome date and preserve the schedule's original
+      // cadence anchor while skipping holidays, vacations, and skipped dates.
+      const next = toDateOnlyString(
+        advanceToNextDue(sub, addDays(params.deliveryDate, 1), holidays),
+      );
       await updateSubscriptionRow(tenantId, subscriptionId, { nextDeliveryDate: next }, t);
     }
 
@@ -571,12 +612,12 @@ export async function recordDeliveryOutcome(
       { reason: params.reason ?? null, changedById: actorId },
       t,
     );
-    return { delivery, transactionId, userId: sub.userId };
+    return { delivery, transactionId, userId: sub.userId, ledgerChanged };
   };
   if (tx) return run(tx);
   const result = await withTransaction(run);
   // Refresh the covering invoice once the ledger write is committed.
-  if (result.transactionId) syncInvoiceSoon(tenantId, result.userId);
+  if (result.ledgerChanged) syncInvoiceSoon(tenantId, result.userId);
   return result;
 }
 
@@ -662,9 +703,12 @@ export async function deleteDeliveryHistoryEntry(
     const remaining = await listFutureDeliveriesFrom(tenantId, subscriptionId, '0001-01-01', t);
     const lastDate = remaining.reduce(
       (max, r) => (r.deliveryDate > max ? r.deliveryDate : max),
-      today,
+      '',
     );
-    const base = lastDate > today ? lastDate : today;
+    const base =
+      lastDate >= today && lastDate
+        ? addDays(lastDate, 1)
+        : today;
     const holidays = await getHolidayDateSet(tenantId, t);
     const next = toDateOnlyString(advanceToNextDue(sub, base, holidays));
     await updateSubscriptionRow(tenantId, subscriptionId, { nextDeliveryDate: next }, t);
@@ -729,6 +773,13 @@ export async function scheduleSubscriptionChange(
             ? round2(input.scheduledPrice).toFixed(2)
             : sub.scheduledPrice,
         scheduledSlot: input.scheduledQty !== undefined ? scheduledSlot : sub.scheduledSlot,
+        scheduledDeliverySchedule: input.deliverySchedule ?? sub.scheduledDeliverySchedule,
+        scheduledCustomDays:
+          input.deliverySchedule === 'custom'
+            ? input.customDays ?? sub.customDays
+            : input.deliverySchedule !== undefined
+              ? null
+              : sub.scheduledCustomDays,
         scheduledChangeDate: input.effectiveDate,
       },
       t,
@@ -741,12 +792,16 @@ export async function scheduleSubscriptionChange(
         scheduledQty: sub.scheduledQty,
         scheduledPrice: sub.scheduledPrice,
         scheduledSlot: sub.scheduledSlot,
+        scheduledDeliverySchedule: sub.scheduledDeliverySchedule,
+        scheduledCustomDays: sub.scheduledCustomDays,
         scheduledChangeDate: sub.scheduledChangeDate,
       },
       {
         scheduledQty: updated!.scheduledQty,
         scheduledPrice: updated!.scheduledPrice,
         scheduledSlot: updated!.scheduledSlot,
+        scheduledDeliverySchedule: updated!.scheduledDeliverySchedule,
+        scheduledCustomDays: updated!.scheduledCustomDays,
         scheduledChangeDate: updated!.scheduledChangeDate,
       },
       { effectiveDate: input.effectiveDate, changedById: actorId },
@@ -769,7 +824,14 @@ export async function cancelScheduledChange(
     const updated = await updateSubscriptionRow(
       tenantId,
       subscriptionId,
-      { scheduledQty: null, scheduledPrice: null, scheduledSlot: null, scheduledChangeDate: null },
+      {
+        scheduledQty: null,
+        scheduledPrice: null,
+        scheduledSlot: null,
+        scheduledDeliverySchedule: null,
+        scheduledCustomDays: null,
+        scheduledChangeDate: null,
+      },
       t,
     );
     await audit(
@@ -780,9 +842,18 @@ export async function cancelScheduledChange(
         scheduledQty: sub.scheduledQty,
         scheduledPrice: sub.scheduledPrice,
         scheduledSlot: sub.scheduledSlot,
+        scheduledDeliverySchedule: sub.scheduledDeliverySchedule,
+        scheduledCustomDays: sub.scheduledCustomDays,
         scheduledChangeDate: sub.scheduledChangeDate,
       },
-      { scheduledQty: null, scheduledPrice: null, scheduledSlot: null, scheduledChangeDate: null },
+      {
+        scheduledQty: null,
+        scheduledPrice: null,
+        scheduledSlot: null,
+        scheduledDeliverySchedule: null,
+        scheduledCustomDays: null,
+        scheduledChangeDate: null,
+      },
       { reason: 'Scheduled change cancelled', changedById: actorId },
       t,
     );
@@ -1068,13 +1139,18 @@ export async function cancelSubscription(
     const updated = await updateSubscriptionRow(
       tenantId,
       subscriptionId,
-      { status: 'cancelled' },
+      { status: 'cancelled', ...clearScheduledChangePatch() },
       t,
     );
-    await audit(tenantId, subscriptionId, 'status', { status: sub.status }, { status: 'cancelled' }, {
-      reason: 'Cancelled',
-      changedById: actorId,
-    }, t);
+    await audit(
+      tenantId,
+      subscriptionId,
+      'status',
+      snapshotOf(sub),
+      snapshotOf(updated!),
+      { reason: 'Cancelled', changedById: actorId },
+      t,
+    );
     return updated;
   };
   if (tx) return run(tx);
@@ -1287,9 +1363,15 @@ export async function adminUpdateSubscription(
       patch.deliverySchedule = input.deliverySchedule as Subscription['deliverySchedule'];
     }
     if (input.customDays !== undefined) patch.customDays = input.customDays;
+    const effectiveSchedule = patch.deliverySchedule ?? sub.deliverySchedule;
+    const effectiveDays = patch.customDays ?? sub.customDays ?? [];
+    if (effectiveSchedule === 'custom' && effectiveDays.length === 0) {
+      throw new AppError('customDays is required for custom schedule', 422);
+    }
     if (input.status !== undefined) {
       patch.status = input.status;
       if (input.status === 'active') patch.pauseReason = null;
+      if (input.status === 'cancelled') Object.assign(patch, clearScheduledChangePatch());
     }
     if (input.areaId !== undefined) patch.areaId = input.areaId;
 
@@ -1302,7 +1384,11 @@ export async function adminUpdateSubscription(
     ) {
       patch.totalPricePerDelivery = round2(qty * price).toFixed(2);
     }
-    if (patch.deliverySchedule !== undefined || patch.customDays !== undefined) {
+    const shouldRecomputeNextDelivery =
+      patch.deliverySchedule !== undefined ||
+      patch.customDays !== undefined ||
+      (input.status === 'active' && sub.status !== 'active');
+    if (shouldRecomputeNextDelivery) {
       const holidays = await getHolidayDateSet(tenantId, t);
       patch.nextDeliveryDate = toDateOnlyString(
         advanceToNextDue(
@@ -1353,15 +1439,30 @@ export async function adminUpdateSubscriptionStatus(
 ) {
   const run = async (t: DBOrTx) => {
     const sub = await loadSubscription(tenantId, subscriptionId, t);
+    const holidays = status === 'active' ? await getHolidayDateSet(tenantId, t) : null;
     const updated = await updateSubscriptionRow(
       tenantId,
       subscriptionId,
-      status === 'active' ? { status, pauseReason: null } : { status },
+      status === 'active'
+        ? {
+            status,
+            pauseReason: null,
+            nextDeliveryDate: toDateOnlyString(advanceToNextDue(sub, todayStr(), holidays)),
+          }
+        : status === 'cancelled'
+          ? { status, ...clearScheduledChangePatch() }
+          : { status },
       t,
     );
-    await audit(tenantId, subscriptionId, 'status', { status: sub.status }, { status }, {
-      changedById: adminId,
-    }, t);
+    await audit(
+      tenantId,
+      subscriptionId,
+      'status',
+      snapshotOf(sub),
+      snapshotOf(updated!),
+      { changedById: adminId },
+      t,
+    );
     return updated;
   };
   if (tx) return run(tx);
@@ -1394,10 +1495,31 @@ export async function getSubscriptionById(
   return { ...sub, slots, deliveries, changes };
 }
 
+export async function assertSubscriptionAccess(
+  tenantId: string,
+  subscriptionId: string,
+  requester: { id?: string; isAdmin: boolean },
+  dbOrTx: DBOrTx = db,
+): Promise<void> {
+  const sub = await loadSubscription(tenantId, subscriptionId, dbOrTx);
+  assertOwnerOrAdmin(sub, requester.id, requester.isAdmin);
+}
+
 export async function listSubscriptionsAdminService(
   tenantId: string,
-  filters: { status?: 'active' | 'paused' | 'cancelled'; search?: string },
-  pagination: { page: number; limit: number; offset: number },
+  filters: {
+    status?: 'active' | 'paused' | 'cancelled';
+    search?: string;
+    schedule?: 'daily' | 'alternate' | 'weekly' | 'custom';
+    productId?: string;
+  },
+  pagination: {
+    page: number;
+    limit: number;
+    offset: number;
+    sortBy?: 'createdAt' | 'quantityPerDelivery' | 'pricePerPacket';
+    sortOrder: 'asc' | 'desc';
+  },
   dbOrTx: DBOrTx = db,
 ) {
   const [items, total] = await Promise.all([
@@ -1456,25 +1578,352 @@ export async function getTodaySupply(
   return { date, count: due.length, totalQuantity, bySlot, items };
 }
 
+/** Shape consumed by the management-v2 delivery board UI. */
+export interface BoardEntry {
+  id: string;
+  userId: string;
+  customerName: string;
+  phone: string | null;
+  email: string | null;
+  areaId: string | null;
+  areaName: string | null;
+  address: string | null;
+  lat: number | null;
+  lng: number | null;
+  type: 'subscription' | 'order';
+  subscriptionId: string | null;
+  deliverySlot: DeliverySlot | null;
+  orderId: string | null;
+  productId: string | null;
+  productName: string | null;
+  unit: string | null;
+  deliveryStatus: string;
+  quantity: number;
+  scheduledQuantity: number;
+  actualQuantity: number | null;
+  volumeInLiters: number | null;
+  outcome: { actualQuantity?: number; notes?: string | null } | null;
+  canRecordOutcome: boolean;
+  sequence: number | null;
+}
+
+type SubWithSlots = Subscription & { slots?: Array<{ slot: DeliverySlot; quantityPerDelivery: number }> };
+
+interface BoardUser {
+  id: string;
+  name: string;
+  phone: string;
+  email: string | null;
+  assignedAreaId: string | null;
+  deliverySequence: number | null;
+}
+
+interface BoardProduct {
+  id: string;
+  name: string;
+  unit: string;
+}
+
+interface BoardOrderItems {
+  orderId: string;
+  productId: string | null;
+  productName: string;
+  unit: string | null;
+  quantity: string;
+}
+
+function pickAddress(userId: string, byUser: Map<string, UserAddress[]>): UserAddress | undefined {
+  const list = byUser.get(userId);
+  if (!list || list.length === 0) return undefined;
+  return list.find((a) => a.isDefault) ?? list[0];
+}
+
+function addressToString(addr: UserAddress | undefined): string | null {
+  if (!addr) return null;
+  const parts = [addr.street, addr.city, addr.state, addr.pincode ? `- ${addr.pincode}` : null];
+  const filtered = parts.filter(Boolean) as string[];
+  return filtered.length ? filtered.join(', ') : null;
+}
+
+function volumeInLiters(
+  scheduledQty: number,
+  variantQuantity: string | number | null | undefined,
+  variantUnit: string | null | undefined,
+  productUnit: string | null | undefined,
+): number | null {
+  if (variantQuantity != null && num(variantQuantity) > 0) {
+    const u = (variantUnit ?? '').toLowerCase();
+    if (u === 'ml') return round2((num(variantQuantity) / 1000) * scheduledQty);
+    if (u === 'L') return round2(num(variantQuantity) * scheduledQty);
+    return null;
+  }
+  if ((productUnit ?? '').toLowerCase() === 'L') return round2(scheduledQty);
+  return null;
+}
+
+/** Builds unified, enriched delivery-board entries from the due subscriptions and pending orders. */
+async function buildBoardEntries(
+  tenantId: string,
+  date: string,
+  slot: DeliverySlot | undefined,
+  subs: SubWithSlots[],
+  orders: Order[],
+  dbOrTx: DBOrTx,
+): Promise<BoardEntry[]> {
+  const userIds = [...new Set([...subs.map((s) => s.userId), ...orders.map((o) => o.userId)])];
+  const users = userIds.length ? (await findBoardUsers(tenantId, userIds, dbOrTx)) as BoardUser[] : [];
+  const userMap = new Map(users.map((u) => [u.id, u]));
+
+  const areaIds = [
+    ...new Set(
+      [
+        ...subs.map((s) => s.areaId ?? userMap.get(s.userId)?.assignedAreaId).filter((v): v is string => !!v),
+        ...orders.map((o) => o.areaId ?? userMap.get(o.userId)?.assignedAreaId).filter((v): v is string => !!v),
+      ],
+    ),
+  ];
+  const areas = areaIds.length ? await findBoardAreas(tenantId, areaIds, dbOrTx) : [];
+  const areaMap = new Map(areas.map((a) => [a.id, a.name]));
+
+  const orderItems = orders.length ? (await findOrderItemsForBoard(tenantId, orders.map((o) => o.id), dbOrTx)) as BoardOrderItems[] : [];
+  const itemsByOrder = new Map<string, BoardOrderItems[]>();
+  for (const it of orderItems) {
+    const arr = itemsByOrder.get(it.orderId) ?? [];
+    arr.push(it);
+    itemsByOrder.set(it.orderId, arr);
+  }
+
+  const productIds = [
+    ...new Set([
+      ...subs.map((s) => s.productId).filter((v): v is string => !!v),
+      ...orderItems.map((it) => it.productId).filter((v): v is string => !!v),
+    ]),
+  ];
+  const products = productIds.length ? (await findBoardProducts(tenantId, productIds, dbOrTx)) as BoardProduct[] : [];
+  const productMap = new Map(products.map((p) => [p.id, p]));
+
+  const addresses = userIds.length ? await findBoardAddresses(tenantId, userIds, dbOrTx) : [];
+  const addressesByUser = new Map<string, UserAddress[]>();
+  for (const a of addresses) {
+    const arr = addressesByUser.get(a.userId) ?? [];
+    arr.push(a);
+    addressesByUser.set(a.userId, arr);
+  }
+
+  const deliveries =
+    subs.length ? await findDeliveriesForDate(tenantId, subs.map((s) => s.id), date, dbOrTx) : [];
+  const deliveryBySub = new Map<string, SubscriptionDelivery[]>();
+  for (const d of deliveries) {
+    const arr = deliveryBySub.get(d.subscriptionId) ?? [];
+    arr.push(d);
+    deliveryBySub.set(d.subscriptionId, arr);
+  }
+
+  const entries: BoardEntry[] = [];
+
+  for (const s of subs) {
+    const u = userMap.get(s.userId);
+    const areaId = s.areaId ?? u?.assignedAreaId ?? null;
+    const addr = pickAddress(s.userId, addressesByUser);
+    const prod = productMap.get(s.productId);
+    const dlist = deliveryBySub.get(s.id) ?? [];
+    const configuredSlots =
+      s.slots?.length
+        ? s.slots
+        : [{ slot: s.deliverySlot as DeliverySlot, quantityPerDelivery: num(s.quantityPerDelivery) }];
+    const slots = slot ? configuredSlots.filter((configured) => configured.slot === slot) : configuredSlots;
+    for (const configured of slots) {
+      const existing = dlist.find((d) => d.deliverySlot === configured.slot);
+      const scheduledQty = num(configured.quantityPerDelivery);
+      const actualQty = existing?.actualQuantity != null ? num(existing.actualQuantity) : null;
+      entries.push({
+        id: `${s.id}-${configured.slot}`,
+        userId: s.userId,
+        customerName: u?.name ?? 'Unknown customer',
+        phone: u?.phone ?? null,
+        email: u?.email ?? null,
+        areaId,
+        areaName: areaId ? areaMap.get(areaId) ?? null : null,
+        address: addressToString(addr),
+        lat: addr?.lat != null ? num(addr.lat) : null,
+        lng: addr?.lng != null ? num(addr.lng) : null,
+        type: 'subscription',
+        subscriptionId: s.id,
+        deliverySlot: configured.slot,
+        orderId: null,
+        productId: s.productId,
+        productName: prod ? (s.variantLabel ? `${prod.name} (${s.variantLabel})` : prod.name) : s.variantLabel ?? '—',
+        unit: s.variantUnit ?? prod?.unit ?? null,
+        deliveryStatus: existing ? existing.status : 'pending',
+        quantity: scheduledQty,
+        scheduledQuantity: scheduledQty,
+        actualQuantity: actualQty,
+        volumeInLiters: volumeInLiters(scheduledQty, s.variantQuantity, s.variantUnit, prod?.unit ?? null),
+        outcome:
+          existing && actualQty != null
+            ? { actualQuantity: actualQty, notes: existing.notes ?? null }
+            : null,
+        canRecordOutcome: !existing,
+        sequence: u?.deliverySequence ?? null,
+      });
+    }
+  }
+
+  for (const o of orders) {
+    const u = userMap.get(o.userId);
+    const areaId = o.areaId ?? u?.assignedAreaId ?? null;
+    const items = itemsByOrder.get(o.id) ?? [];
+    const productName =
+      items.length === 1
+        ? items[0].productName
+        : items.map((it) => `${it.productName} ×${num(it.quantity)}`).join(', ') || 'Order';
+    const qty = items.reduce((a, it) => a + num(it.quantity), 0);
+    const unit = items.length === 1 ? items[0].unit ?? 'item' : 'items';
+    const deliveryStatus =
+      o.orderStatus === 'delivered' ? 'delivered' : o.orderStatus === 'cancelled' ? 'skipped' : 'pending';
+    const canRecordOutcome = o.orderStatus !== 'delivered' && o.orderStatus !== 'cancelled';
+    const addr = pickAddress(o.userId, addressesByUser);
+    const address =
+      o.addressStreet !== null && o.addressStreet !== undefined
+        ? [o.addressStreet, o.addressCity, o.addressState, o.addressPincode ? `- ${o.addressPincode}` : null]
+            .filter(Boolean)
+            .join(', ')
+        : addressToString(addr);
+    entries.push({
+      id: o.id,
+      userId: o.userId,
+      customerName: u?.name ?? 'Unknown customer',
+      phone: u?.phone ?? null,
+      email: u?.email ?? null,
+      areaId,
+      areaName: areaId ? areaMap.get(areaId) ?? null : null,
+      address: address || null,
+      lat: o.addressLat != null ? num(o.addressLat) : addr?.lat != null ? num(addr.lat) : null,
+      lng: o.addressLng != null ? num(o.addressLng) : addr?.lng != null ? num(addr.lng) : null,
+      type: 'order',
+      subscriptionId: null,
+      deliverySlot: null,
+      orderId: o.id,
+      productId: items.length ? items[0].productId ?? null : null,
+      productName: productName || '—',
+      unit,
+      deliveryStatus,
+      quantity: qty,
+      scheduledQuantity: qty,
+      actualQuantity: null,
+      volumeInLiters: null,
+      outcome: null,
+      canRecordOutcome,
+      sequence: u?.deliverySequence ?? null,
+    });
+  }
+
+  return entries;
+}
+
+/** Minimal fallback used if board enrichment fails — never serves a 500 from the board endpoint. */
+function minimalBoardEntries(subs: SubWithSlots[], orders: Order[]): BoardEntry[] {
+  const items: BoardEntry[] = [];
+  for (const s of subs) {
+    const configuredSlots =
+      s.slots?.length
+        ? s.slots
+        : [{ slot: s.deliverySlot as DeliverySlot, quantityPerDelivery: num(s.quantityPerDelivery) }];
+    for (const configured of configuredSlots) {
+      const scheduledQty = num(configured.quantityPerDelivery);
+      items.push({
+        id: `${s.id}-${configured.slot}`,
+        userId: s.userId,
+        customerName: 'Unknown customer',
+        phone: null,
+        email: null,
+        areaId: s.areaId ?? null,
+        areaName: null,
+        address: null,
+        lat: null,
+        lng: null,
+        type: 'subscription',
+        subscriptionId: s.id,
+        deliverySlot: configured.slot,
+        orderId: null,
+        productId: s.productId,
+        productName: s.variantLabel ?? '—',
+        unit: s.variantUnit ?? null,
+        deliveryStatus: 'pending',
+        quantity: scheduledQty,
+        scheduledQuantity: scheduledQty,
+        actualQuantity: null,
+        volumeInLiters: null,
+        outcome: null,
+        canRecordOutcome: true,
+        sequence: null,
+      });
+    }
+  }
+  for (const o of orders) {
+    items.push({
+      id: o.id,
+      userId: o.userId,
+      customerName: 'Unknown customer',
+      phone: null,
+      email: null,
+      areaId: o.areaId ?? null,
+      areaName: null,
+      address: [o.addressStreet, o.addressCity, o.addressState].filter(Boolean).join(', ') || null,
+      lat: o.addressLat != null ? num(o.addressLat) : null,
+      lng: o.addressLng != null ? num(o.addressLng) : null,
+      type: 'order',
+      subscriptionId: null,
+      deliverySlot: null,
+      orderId: o.id,
+      productId: null,
+      productName: 'Order',
+      unit: null,
+      deliveryStatus:
+        o.orderStatus === 'delivered' ? 'delivered' : o.orderStatus === 'cancelled' ? 'skipped' : 'pending',
+      quantity: 0,
+      scheduledQuantity: 0,
+      actualQuantity: null,
+      volumeInLiters: null,
+      outcome: null,
+      canRecordOutcome: o.orderStatus !== 'delivered' && o.orderStatus !== 'cancelled',
+      sequence: null,
+    });
+  }
+  return items;
+}
+
 export async function getDeliveryBoard(
   tenantId: string,
   opts: { date?: string; slot?: 'morning' | 'evening' },
-  orders: unknown[] = [],
+  orders: Order[] = [],
   dbOrTx: DBOrTx = db,
 ) {
   // Pending one-time orders are merged by the controller via the orders module.
+  const date = opts.date ?? todayStr();
   const supply = await getTodaySupply(tenantId, opts, dbOrTx);
+  const subs = supply.items;
+
+  let entries: BoardEntry[];
+  try {
+    entries = await buildBoardEntries(tenantId, date, opts.slot, subs, orders, dbOrTx);
+  } catch (err) {
+    logger.error({ err, tenantId }, 'delivery-board: enrichment failed, returning minimal entries');
+    entries = minimalBoardEntries(subs, orders);
+  }
+
+  const summary = {
+    total: entries.length,
+    remainingDeliveries: entries.filter((e) => e.canRecordOutcome).length,
+    delivered: entries.filter((e) => e.deliveryStatus === 'delivered').length,
+    pending: entries.filter((e) => e.deliveryStatus === 'pending').length,
+  };
+
   return {
     date: supply.date,
     slot: opts.slot ?? null,
-    subscriptions: supply.items,
-    orders,
-    summary: {
-      subscriptionCount: supply.count,
-      totalQuantity: supply.totalQuantity,
-      bySlot: supply.bySlot,
-      orderCount: orders.length,
-    },
+    entries,
+    summary,
   };
 }
 

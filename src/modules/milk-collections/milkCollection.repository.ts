@@ -298,10 +298,28 @@ export async function findActiveTxnForCollection(tenantId: string, collectionId:
   return rows[0] ?? null;
 }
 
-export async function listCollectionsInRange(tenantId: string, startDate: string, endDate: string, dbOrTx: DBOrTx = db) {
+export async function listCollectionsInRange(tenantId: string, startDate: string, endDate: string, dbOrTx: DBOrTx = db): Promise<CollectionRow[]> {
   return (dbOrTx as typeof db)
-    .select()
+    .select({
+      id: milkCollections.id,
+      supplierId: milkCollections.supplierId,
+      supplierName: suppliers.name,
+      date: milkCollections.collectionDate,
+      session: milkCollections.session,
+      expectedQty: milkCollections.expectedQty,
+      actualQty: milkCollections.actualQty,
+      fatContent: milkCollections.fatContent,
+      snf: milkCollections.snf,
+      ratePerLiter: milkCollections.ratePerLiter,
+      status: milkCollections.status,
+      confirmedById: milkCollections.confirmedById,
+      confirmedAt: milkCollections.confirmedAt,
+      notes: milkCollections.notes,
+      createdAt: milkCollections.createdAt,
+      updatedAt: milkCollections.updatedAt,
+    })
     .from(milkCollections)
+    .leftJoin(suppliers, eq(milkCollections.supplierId, suppliers.id))
     .where(
       and(
         eq(milkCollections.tenantId, tenantId),

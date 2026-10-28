@@ -65,6 +65,8 @@ export const subscriptions = pgTable(
     scheduledPrice: numeric('scheduled_price', { precision: 10, scale: 2 }),
     // Target slot for scheduledQty on multi-slot subscriptions.
     scheduledSlot: deliverySlotEnum('scheduled_slot'),
+    scheduledDeliverySchedule: deliveryScheduleEnum('scheduled_delivery_schedule'),
+    scheduledCustomDays: text('scheduled_custom_days').array(),
     scheduledChangeDate: date('scheduled_change_date'),
     scheduledEndDate: date('scheduled_end_date'),
     createdById: uuid('created_by_id').references(() => users.id),

@@ -399,7 +399,7 @@ export async function updateManifestEntry(
   try {
     sseManager.broadcast(
       `${tenantId}:${result.manifest.areaId}:${result.manifest.manifestDate}:${result.manifest.deliverySlot}`,
-      { type: 'entry_updated', entryId, status: data.status, manifestComplete: result.manifestComplete },
+      { type: 'manifest:entry_updated', entryId, status: data.status, manifestComplete: result.manifestComplete },
     );
   } catch (err) {
     logger.error({ err, entryId }, 'SSE broadcast failed after manifest entry update');

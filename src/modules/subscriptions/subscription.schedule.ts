@@ -1,4 +1,4 @@
-import { addDays, normalizeDate } from '../../shared/utils/dateUtils.js';
+import { addDays, differenceInCalendarDays, normalizeDate } from '../../shared/utils/dateUtils.js';
 
 // Pure scheduling helpers ported from backend/services/scheduler.js.
 // No DB access here — these are exported for unit tests.
@@ -65,7 +65,20 @@ export function isSubscriptionDueOnDate(
   }
 
   const anchor = sub.nextDeliveryDate ?? sub.startDate ?? normalizedDate;
-  return normalizedDate.getTime() >= normalizeDate(anchor).getTime();
+  const anchorDate = normalizeDate(anchor);
+  if (normalizedDate < anchorDate) return false;
+
+  const daysSinceAnchor = differenceInCalendarDays(normalizedDate, anchorDate);
+  switch (sub.deliverySchedule) {
+    case 'alternate':
+      return daysSinceAnchor % 2 === 0;
+    case 'weekly':
+      return daysSinceAnchor % 7 === 0;
+    case 'custom':
+      return (sub.customDays ?? []).includes(DAY_NAMES[normalizedDate.getDay()] as string);
+    default:
+      return true;
+  }
 }
 
 export function calculateNextDeliveryDate(
@@ -114,16 +127,9 @@ export function advanceToNextDue(
 ): Date {
   let candidate = normalizeDate(fromDate);
   const probe: SchedulableSubscription = { ...sub, status: 'active' };
-  for (let i = 0; i < 60; i += 1) {
-    probe.nextDeliveryDate = candidate;
+  for (let i = 0; i < 400; i += 1) {
     if (isSubscriptionDueOnDate(probe, candidate, holidays)) return candidate;
-    candidate = normalizeDate(
-      calculateNextDeliveryDate(
-        { deliverySchedule: sub.deliverySchedule, customDays: sub.customDays },
-        candidate,
-        holidays,
-      ),
-    );
+    candidate = addDays(candidate, 1);
   }
   return candidate;
 }

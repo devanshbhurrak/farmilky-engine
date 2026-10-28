@@ -288,7 +288,7 @@ export async function updateCollection(
       await transactionService.voidTransaction(
         existingTxn.id,
         tenantId,
-        input.void_reason ?? 'Correction',
+        'Correction',
         adminId,
         t,
       );
@@ -377,7 +377,7 @@ export async function getMissingCollections(tenantId: string, query: MissingQuer
   const activeSuppliers = await listActiveSuppliers(tenantId, dbOrTx);
   const dates = eachDate(startDate, endDate);
   const existing = await listCollectionsInRange(tenantId, startDate, endDate, dbOrTx);
-  const existingSet = new Set(existing.map((c) => `${c.supplierId}|${c.collectionDate}|${c.session}`));
+  const existingSet = new Set(existing.map((c) => `${c.supplierId}|${c.date}|${c.session}`));
   const missing: Array<{ date: string; session: 'morning' | 'evening'; supplierId: string; supplierName: string }> = [];
   for (const date of dates) {
     for (const s of activeSuppliers) {

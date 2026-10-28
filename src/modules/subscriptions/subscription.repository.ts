@@ -1,4 +1,18 @@
-import { and, count, desc, eq, exists, gte, ilike, inArray, lte, or, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  exists,
+  gte,
+  ilike,
+  inArray,
+  lt,
+  lte,
+  or,
+  sql,
+} from 'drizzle-orm';
 import { db } from '../../shared/db/client.js';
 import type { DBOrTx } from '../../shared/types/index.js';
 import {
@@ -178,18 +192,36 @@ export async function updateSubscriptionSlotQty(
 
 export async function listSubscriptionsAdmin(
   tenantId: string,
-  filters: { status?: 'active' | 'paused' | 'cancelled'; search?: string },
-  pagination: { limit: number; offset: number },
+  filters: {
+    status?: 'active' | 'paused' | 'cancelled';
+    search?: string;
+    schedule?: 'daily' | 'alternate' | 'weekly' | 'custom';
+    productId?: string;
+  },
+  pagination: {
+    limit: number;
+    offset: number;
+    sortBy?: 'createdAt' | 'quantityPerDelivery' | 'pricePerPacket';
+    sortOrder: 'asc' | 'desc';
+  },
   dbOrTx: DBOrTx = db,
 ) {
   const conditions = [eq(subscriptions.tenantId, tenantId)];
   if (filters.status) conditions.push(eq(subscriptions.status, filters.status));
+  if (filters.schedule) conditions.push(eq(subscriptions.deliverySchedule, filters.schedule));
+  if (filters.productId) conditions.push(eq(subscriptions.productId, filters.productId));
   if (filters.search?.trim()) {
     const q = `%${filters.search.trim()}%`;
     conditions.push(
       or(ilike(users.name, q), ilike(users.phone, q), ilike(users.email, q))!,
     );
   }
+  const sortColumn =
+    pagination.sortBy === 'quantityPerDelivery'
+      ? subscriptions.quantityPerDelivery
+      : pagination.sortBy === 'pricePerPacket'
+        ? subscriptions.pricePerPacket
+        : subscriptions.createdAt;
   return (dbOrTx as typeof db)
     .select({
       subscription: subscriptions,
@@ -200,18 +232,25 @@ export async function listSubscriptionsAdmin(
     .from(subscriptions)
     .leftJoin(users, eq(users.id, subscriptions.userId))
     .where(and(...conditions))
-    .orderBy(desc(subscriptions.createdAt))
+    .orderBy(pagination.sortOrder === 'asc' ? asc(sortColumn) : desc(sortColumn))
     .limit(pagination.limit)
     .offset(pagination.offset);
 }
 
 export async function countSubscriptionsAdmin(
   tenantId: string,
-  filters: { status?: 'active' | 'paused' | 'cancelled'; search?: string },
+  filters: {
+    status?: 'active' | 'paused' | 'cancelled';
+    search?: string;
+    schedule?: 'daily' | 'alternate' | 'weekly' | 'custom';
+    productId?: string;
+  },
   dbOrTx: DBOrTx = db,
 ) {
   const conditions = [eq(subscriptions.tenantId, tenantId)];
   if (filters.status) conditions.push(eq(subscriptions.status, filters.status));
+  if (filters.schedule) conditions.push(eq(subscriptions.deliverySchedule, filters.schedule));
+  if (filters.productId) conditions.push(eq(subscriptions.productId, filters.productId));
   if (filters.search?.trim()) {
     const q = `%${filters.search.trim()}%`;
     conditions.push(
@@ -320,6 +359,66 @@ export async function listDeliveriesBySubscription(
       ),
     )
     .orderBy(desc(subscriptionDeliveries.deliveryDate));
+}
+
+function deliveryHistoryConditions(
+  tenantId: string,
+  subscriptionId: string,
+  filter: { month?: number; year?: number },
+) {
+  const conditions = [
+    eq(subscriptionDeliveries.tenantId, tenantId),
+    eq(subscriptionDeliveries.subscriptionId, subscriptionId),
+  ];
+  if (filter.year !== undefined) {
+    conditions.push(gte(subscriptionDeliveries.deliveryDate, `${filter.year}-01-01`));
+    conditions.push(lte(subscriptionDeliveries.deliveryDate, `${filter.year}-12-31`));
+  }
+  if (filter.month !== undefined && filter.year !== undefined) {
+    const month = String(filter.month).padStart(2, '0');
+    const nextMonthYear = filter.month === 12 ? filter.year + 1 : filter.year;
+    const nextMonth = filter.month === 12 ? 1 : filter.month + 1;
+    const nextMonthStart = [
+      String(nextMonthYear).padStart(4, '0'),
+      String(nextMonth).padStart(2, '0'),
+      '01',
+    ].join('-');
+    conditions.push(gte(subscriptionDeliveries.deliveryDate, `${filter.year}-${month}-01`));
+    conditions.push(lt(subscriptionDeliveries.deliveryDate, nextMonthStart));
+  } else if (filter.month !== undefined) {
+    conditions.push(
+      sql`EXTRACT(MONTH FROM ${subscriptionDeliveries.deliveryDate}) = ${filter.month}`,
+    );
+  }
+  return and(...conditions);
+}
+
+export async function listDeliveryHistoryPage(
+  tenantId: string,
+  subscriptionId: string,
+  filter: { month?: number; year?: number; limit: number; offset: number },
+  dbOrTx: DBOrTx = db,
+) {
+  return (dbOrTx as typeof db)
+    .select()
+    .from(subscriptionDeliveries)
+    .where(deliveryHistoryConditions(tenantId, subscriptionId, filter))
+    .orderBy(desc(subscriptionDeliveries.deliveryDate), desc(subscriptionDeliveries.createdAt))
+    .limit(filter.limit)
+    .offset(filter.offset);
+}
+
+export async function countDeliveryHistory(
+  tenantId: string,
+  subscriptionId: string,
+  filter: { month?: number; year?: number },
+  dbOrTx: DBOrTx = db,
+) {
+  const rows = await (dbOrTx as typeof db)
+    .select({ total: count() })
+    .from(subscriptionDeliveries)
+    .where(deliveryHistoryConditions(tenantId, subscriptionId, filter));
+  return rows[0]?.total ?? 0;
 }
 
 export async function listFutureDeliveriesFrom(

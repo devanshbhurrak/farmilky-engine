@@ -25,7 +25,6 @@ export const bulkConfirmSchema = z.object({
 });
 
 export const updateCollectionSchema = z.object({
-  void_reason: z.string().min(1, 'void_reason is required').optional(),
   actualQty: z.number().min(0).optional(),
   ratePerLiter: z.number().min(0).optional(),
   fatContent: z.number().min(0).nullable().optional(),

@@ -3,6 +3,7 @@ import { istToday, toDateOnlyString } from '../../shared/utils/dateUtils.js';
 
 const dateString = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must be YYYY-MM-DD');
 const phoneSchema = z.string().regex(/^[6-9]\d{9}$/, 'phone must be a 10-digit Indian mobile number');
+const pincodeSchema = z.string().regex(/^[1-9][0-9]{5}$/, 'pincode must be a valid 6-digit Indian pincode').optional();
 
 function todayString(): string {
   return toDateOnlyString(istToday());
@@ -13,7 +14,7 @@ export const createSupplierSchema = z.object({
   phone: phoneSchema,
   email: z.string().email().optional(),
   location: z.string().optional(),
-  pincode: z.string().optional(),
+  pincode: pincodeSchema,
   joiningDate: dateString.optional(),
   morningSession: z.boolean().default(true),
   eveningSession: z.boolean().default(false),

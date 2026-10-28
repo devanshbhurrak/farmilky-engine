@@ -18,10 +18,10 @@ export function unsubscribe(key: string, stream: SSEStream): void {
   if (set.size === 0) connections.delete(key);
 }
 
-export function broadcast(key: string, event: unknown): void {
+export function broadcast(key: string, event: { type: string; [k: string]: unknown }): void {
   connections.get(key)?.forEach((s) => {
     try {
-      s.send('message', typeof event === 'string' ? event : JSON.stringify(event));
+      s.send(event.type, JSON.stringify(event));
     } catch {
       // Ignore broken streams; cleanup happens on abort
     }

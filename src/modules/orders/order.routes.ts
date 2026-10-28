@@ -101,6 +101,7 @@ orderRoutes.post(
   auth,
   tenant,
   deliveryOrAdmin,
+  idempotency,
   validateParams(orderIdParamSchema),
   validateBody(deliveryOutcomeSchema),
   deliveryOutcomeController,

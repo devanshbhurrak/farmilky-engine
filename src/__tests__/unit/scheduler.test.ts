@@ -115,8 +115,20 @@ describe('isSubscriptionDueOnDate – delivery schedules', () => {
     expect(isSubscriptionDueOnDate(baseSub({ deliverySchedule: 'alternate' }), D(2026, 1, 5))).toBe(true);
   });
 
+  it('alternate: does not deliver on the day between scheduled dates', () => {
+    const sub = baseSub({ deliverySchedule: 'alternate', nextDeliveryDate: D(2026, 1, 5) });
+    expect(isSubscriptionDueOnDate(sub, D(2026, 1, 6))).toBe(false);
+    expect(isSubscriptionDueOnDate(sub, D(2026, 1, 7))).toBe(true);
+  });
+
   it('weekly: due on nextDeliveryDate', () => {
     expect(isSubscriptionDueOnDate(baseSub({ deliverySchedule: 'weekly' }), D(2026, 1, 5))).toBe(true);
+  });
+
+  it('weekly: does not deliver between scheduled dates', () => {
+    const sub = baseSub({ deliverySchedule: 'weekly', nextDeliveryDate: D(2026, 1, 5) });
+    expect(isSubscriptionDueOnDate(sub, D(2026, 1, 6))).toBe(false);
+    expect(isSubscriptionDueOnDate(sub, D(2026, 1, 12))).toBe(true);
   });
 
   it('custom Monday: true on 2026-01-05 (Monday) which is nextDeliveryDate', () => {
@@ -127,6 +139,7 @@ describe('isSubscriptionDueOnDate – delivery schedules', () => {
   it('custom Monday: still true on later Mondays (nextDeliveryDate passed)', () => {
     const sub = baseSub({ deliverySchedule: 'custom', customDays: ['Monday'], nextDeliveryDate: D(2026, 1, 5) });
     expect(isSubscriptionDueOnDate(sub, D(2026, 1, 12))).toBe(true); // next Monday
+    expect(isSubscriptionDueOnDate(sub, D(2026, 1, 13))).toBe(false);
   });
 });
 
@@ -284,5 +297,47 @@ describe('advanceToNextDue', () => {
     });
     const result = advanceToNextDue(sub, D(2026, 1, 12));
     expect(result.getDate()).toBe(12);
+  });
+
+  it('weekly schedule: preserves the original cadence when advancing from an off-day', () => {
+    const sub = baseSub({
+      deliverySchedule: 'weekly',
+      nextDeliveryDate: D(2026, 1, 12),
+    });
+    const result = advanceToNextDue(sub, D(2026, 1, 13));
+    expect(result.getTime()).toBe(normalizeDate(D(2026, 1, 19)).getTime());
+  });
+
+  it('preserves alternate cadence when advancing beyond an expired vacation', () => {
+    const sub = baseSub({
+      deliverySchedule: 'alternate',
+      nextDeliveryDate: D(2026, 1, 5),
+      vacationFrom: D(2026, 1, 6),
+      vacationUntil: D(2026, 1, 8),
+    });
+    const result = advanceToNextDue(sub, D(2026, 1, 9));
+    expect(result.getTime()).toBe(normalizeDate(D(2026, 1, 9)).getTime());
+  });
+
+  it('preserves weekly cadence when advancing beyond an expired vacation', () => {
+    const sub = baseSub({
+      deliverySchedule: 'weekly',
+      nextDeliveryDate: D(2026, 1, 5),
+      vacationFrom: D(2026, 1, 6),
+      vacationUntil: D(2026, 1, 13),
+    });
+    const result = advanceToNextDue(sub, D(2026, 1, 14));
+    expect(result.getTime()).toBe(normalizeDate(D(2026, 1, 19)).getTime());
+  });
+
+  it('scans past the tenant maximum vacation window before returning the next date', () => {
+    const sub = baseSub({
+      deliverySchedule: 'alternate',
+      nextDeliveryDate: D(2026, 1, 5),
+      vacationFrom: D(2026, 1, 5),
+      vacationUntil: D(2026, 3, 26),
+    });
+    const result = advanceToNextDue(sub, D(2026, 1, 5));
+    expect(result.getTime()).toBe(normalizeDate(D(2026, 3, 28)).getTime());
   });
 });

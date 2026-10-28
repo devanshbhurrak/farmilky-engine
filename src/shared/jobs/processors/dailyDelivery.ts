@@ -3,7 +3,7 @@ import { db } from '../../db/client.js';
 import { subscriptions } from '../../db/schema/index.js';
 import { tenants } from '../../db/schema/index.js';
 import { withTransaction } from '../../db/transaction.js';
-import { istToday, round2, toDateOnlyString } from '../../utils/dateUtils.js';
+import { addDays, istToday, round2, toDateOnlyString } from '../../utils/dateUtils.js';
 import { logger } from '../../utils/logger.js';
 import { getHolidayDateSet } from '../../../modules/holidays/holiday.service.js';
 import { generateManifestsForDate } from '../../../modules/manifests/manifest.service.js';
@@ -14,7 +14,9 @@ import {
   updateSubscriptionRow,
   updateSubscriptionSlotQty,
 } from '../../../modules/subscriptions/subscription.repository.js';
-import { calculateNextDeliveryDate } from '../../../modules/subscriptions/subscription.schedule.js';
+import {
+  advanceToNextDue,
+} from '../../../modules/subscriptions/subscription.schedule.js';
 
 async function listActiveTenantIds(): Promise<string[]> {
   const rows = await db
@@ -65,10 +67,34 @@ async function processDailyTenant(tenantId: string): Promise<void> {
           scheduledQty: null,
           scheduledPrice: null,
           scheduledSlot: null,
+          scheduledDeliverySchedule: null,
+          scheduledCustomDays: null,
           scheduledChangeDate: null,
         };
         if (sub.scheduledQty != null) patch.quantityPerDelivery = String(newQty);
         if (sub.scheduledPrice != null) patch.pricePerPacket = newPrice.toFixed(2);
+        const effectiveSchedule = sub.scheduledDeliverySchedule ?? sub.deliverySchedule;
+        const effectiveCustomDays = sub.scheduledCustomDays ?? sub.customDays;
+        if (sub.scheduledDeliverySchedule != null) {
+          patch.deliverySchedule = sub.scheduledDeliverySchedule;
+        }
+        if (sub.scheduledCustomDays != null) {
+          patch.customDays = sub.scheduledCustomDays;
+        }
+        if (sub.scheduledDeliverySchedule != null || sub.scheduledCustomDays != null) {
+          patch.nextDeliveryDate = toDateOnlyString(
+            advanceToNextDue(
+              {
+                ...sub,
+                deliverySchedule: effectiveSchedule,
+                customDays: effectiveCustomDays,
+                nextDeliveryDate: sub.scheduledChangeDate,
+              },
+              sub.scheduledChangeDate as string,
+              holidays,
+            ),
+          );
+        }
         if (sub.scheduledQty != null || sub.scheduledPrice != null) {
           patch.totalPricePerDelivery = total.toFixed(2);
         }
@@ -136,14 +162,37 @@ async function processDailyTenant(tenantId: string): Promise<void> {
   for (const sub of dueEnds) {
     try {
       await withTransaction(async (tx) => {
-        await updateSubscriptionRow(tenantId, sub.id, { status: 'cancelled' }, tx);
+        const updated = await updateSubscriptionRow(
+          tenantId,
+          sub.id,
+          {
+            status: 'cancelled',
+            scheduledQty: null,
+            scheduledPrice: null,
+            scheduledSlot: null,
+            scheduledDeliverySchedule: null,
+            scheduledCustomDays: null,
+            scheduledChangeDate: null,
+          },
+          tx,
+        );
         await insertSubscriptionChange(
           tenantId,
           {
             subscriptionId: sub.id,
             changeType: 'status',
-            oldValue: { status: sub.status },
-            newValue: { status: 'cancelled' },
+            oldValue: {
+              status: sub.status,
+              scheduledQty: sub.scheduledQty,
+              scheduledPrice: sub.scheduledPrice,
+              scheduledChangeDate: sub.scheduledChangeDate,
+            },
+            newValue: {
+              status: updated!.status,
+              scheduledQty: updated!.scheduledQty,
+              scheduledPrice: updated!.scheduledPrice,
+              scheduledChangeDate: updated!.scheduledChangeDate,
+            },
             effectiveDate: sub.scheduledEndDate,
             reason: 'Scheduled end date reached',
             changedById: null,
@@ -172,7 +221,7 @@ async function processDailyTenant(tenantId: string): Promise<void> {
   for (const sub of expiredVacations) {
     try {
       const next = toDateOnlyString(
-        calculateNextDeliveryDate(sub, sub.vacationUntil as string, holidays),
+        advanceToNextDue(sub, addDays(sub.vacationUntil as string, 1), holidays),
       );
       await withTransaction(async (tx) => {
         await updateSubscriptionRow(

@@ -6,6 +6,7 @@ import {
   adminCreateSubscription,
   adminUpdateSubscription,
   adminUpdateSubscriptionStatus,
+  assertSubscriptionAccess,
   bulkPauseSubscriptions,
   bulkResumeSubscriptions,
   cancelScheduledChange,
@@ -30,6 +31,7 @@ import {
   unskipDeliveryDate,
   updateSubscriptionSchedule,
 } from './subscription.service.js';
+import { countDeliveryHistory, listDeliveryHistoryPage } from './subscription.repository.js';
 import type {
   AdminCreateSubscriptionInput,
   AdminSubscriptionListQuery,
@@ -87,35 +89,22 @@ export const getSubscriptionHistoryController = async (c: Context) => {
   const user = c.get('user') as AuthUser;
   const params = c.get('params') as SubscriptionIdParam;
   const query = (c.get('query') ?? {}) as HistoryQuery;
-  const { page, limit, offset } = parsePagination(query);
+  const { page, limit, offset } = parsePagination(query, { maxLimit: 100, defaultLimit: 100 });
 
-  // Verify subscription exists and user has access
-  await getSubscriptionById(user.tenantId, params.id, {
+  const requester = {
     id: user.id,
     isAdmin: isAdmin(user),
-  });
+  };
+  await assertSubscriptionAccess(user.tenantId, params.id, requester);
 
-  // Get all deliveries for the subscription
-  const deliveries = await Promise.resolve(
-    (await import('./subscription.repository.js')).listDeliveriesBySubscription(
-      user.tenantId,
-      params.id,
-    ),
-  );
-
-  // Filter by month/year if provided
-  const month = query.month ? Number(query.month) : undefined;
-  const year = query.year ? Number(query.year) : undefined;
-  const filtered = deliveries.filter((d) => {
-    if (!month && !year) return true;
-    const date = new Date(d.deliveryDate as string);
-    if (year && date.getFullYear() !== year) return false;
-    if (month && date.getMonth() + 1 !== month) return false;
-    return true;
-  });
-
-  const total = filtered.length;
-  const items = filtered.slice(offset, offset + limit);
+  const filter = {
+    month: query.month ? Number(query.month) : undefined,
+    year: query.year ? Number(query.year) : undefined,
+  };
+  const [items, total] = await Promise.all([
+    listDeliveryHistoryPage(user.tenantId, params.id, { ...filter, limit, offset }),
+    countDeliveryHistory(user.tenantId, params.id, filter),
+  ]);
   return paginated(c, items, buildMeta(total, page, limit));
 };
 
@@ -186,8 +175,13 @@ export const adminListSubscriptionsController = async (c: Context) => {
   const { page, limit, offset } = parsePagination(query);
   const { items, total } = await listSubscriptionsAdminService(
     user.tenantId,
-    { status: query.status, search: query.search },
-    { page, limit, offset },
+    {
+      status: query.status,
+      search: query.search,
+      schedule: query.schedule,
+      productId: query.productId,
+    },
+    { page, limit, offset, sortBy: query.sortBy, sortOrder: query.sortOrder ?? 'desc' },
   );
   return paginated(c, items, buildMeta(total, page, limit));
 };

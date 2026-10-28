@@ -6,6 +6,7 @@ import { istToday, toDateOnlyString } from '../../shared/utils/dateUtils.js';
 import { buildMeta, parsePagination } from '../../shared/utils/pagination.js';
 import { findActiveByParty } from '../transactions/transaction.repository.js';
 import { transactionService } from '../transactions/transaction.service.js';
+import { listConfirmedUnsettled as listUnsettledCollections } from '../milk-collections/milkCollection.repository.js';
 import {
   countConfirmedUnsettled,
   findSupplierById,
@@ -24,6 +25,19 @@ import type {
   UpdateSupplierInput,
 } from './supplier.schema.js';
 
+async function computeSupplierOutstanding(tenantId: string, supplierId: string, dbOrTx: DBOrTx = db) {
+  const unsettled = await listUnsettledCollections(tenantId, supplierId, dbOrTx);
+  const outstandingAmount = unsettled.reduce((sum, item) => sum + Number(item.txnAmount), 0);
+  return { outstandingAmount, collectionCount: unsettled.length };
+}
+
+function toCollectionSessions(supplier: { morningSession: boolean; eveningSession: boolean }): string[] {
+  const sessions: string[] = [];
+  if (supplier.morningSession) sessions.push('morning');
+  if (supplier.eveningSession) sessions.push('evening');
+  return sessions;
+}
+
 export async function createSupplier(
   tenantId: string,
   input: CreateSupplierInput,
@@ -33,7 +47,17 @@ export async function createSupplier(
   const run = async (t: DrizzleTx) => {
     const existing = await findSupplierByPhone(tenantId, input.phone, t);
     if (existing) throw new AppError('Supplier phone already exists', 409);
-    return insertSupplier(tenantId, input, t);
+    const created = await insertSupplier(tenantId, input, t);
+    
+    // Return enriched supplier with computed fields (will be 0 for new supplier)
+    const balance = Number(created.balance ?? 0);
+    return {
+      ...created,
+      balance,
+      outstandingAmount: 0,
+      totalPaid: 0,
+      collectionSessions: toCollectionSessions(created),
+    };
   };
   if (tx) return run(tx);
   return withTransaction(run);
@@ -42,13 +66,42 @@ export async function createSupplier(
 export async function getSupplier(tenantId: string, supplierId: string, dbOrTx: DBOrTx = db) {
   const supplier = await findSupplierById(tenantId, supplierId, dbOrTx);
   if (!supplier) throw new AppError('Supplier not found', 404);
-  return supplier;
+  
+  // Compute outstanding amount from unsettled collections
+  const { outstandingAmount } = await computeSupplierOutstanding(tenantId, supplierId, dbOrTx);
+  const balance = Number(supplier.balance ?? 0);
+  const totalPaid = Math.max(0, -balance + outstandingAmount);
+  
+  return {
+    ...supplier,
+    balance: balance,
+    outstandingAmount,
+    totalPaid,
+    collectionSessions: toCollectionSessions(supplier),
+  };
 }
 
 export async function listSuppliersService(tenantId: string, query: SupplierListQuery, dbOrTx: DBOrTx = db) {
   const { page, limit, offset } = parsePagination(query);
   const { rows, total } = await listSuppliers(tenantId, { limit, offset }, dbOrTx);
-  return { rows, meta: buildMeta(total, page, limit) };
+  
+  // Enrich each supplier with computed fields
+  const enrichedRows = await Promise.all(
+    rows.map(async (supplier) => {
+      const { outstandingAmount } = await computeSupplierOutstanding(tenantId, supplier.id, dbOrTx);
+      const balance = Number(supplier.balance ?? 0);
+      const totalPaid = Math.max(0, -balance + outstandingAmount);
+      return {
+        ...supplier,
+        balance,
+        outstandingAmount,
+        totalPaid,
+        collectionSessions: toCollectionSessions(supplier),
+      };
+    })
+  );
+  
+  return { rows: enrichedRows, meta: buildMeta(total, page, limit) };
 }
 
 export async function updateSupplier(
@@ -67,7 +120,18 @@ export async function updateSupplier(
     }
     const updated = await updateSupplierRow(tenantId, supplierId, input, t);
     if (!updated) throw new AppError('Supplier not found', 404);
-    return updated;
+    
+    // Return enriched supplier with computed fields
+    const { outstandingAmount } = await computeSupplierOutstanding(tenantId, supplierId, t);
+    const balance = Number(updated.balance ?? 0);
+    const totalPaid = Math.max(0, -balance + outstandingAmount);
+    return {
+      ...updated,
+      balance,
+      outstandingAmount,
+      totalPaid,
+      collectionSessions: toCollectionSessions(updated),
+    };
   };
   if (tx) return run(tx);
   return withTransaction(run);
@@ -97,16 +161,29 @@ export async function setSupplierStatus(
     if (!existing) throw new AppError('Supplier not found', 404);
     const updated = await updateSupplierRow(tenantId, supplierId, { isActive }, t);
     if (!updated) throw new AppError('Supplier not found', 404);
+    
+    // Compute enriched supplier data
+    const { outstandingAmount } = await computeSupplierOutstanding(tenantId, supplierId, t);
+    const balance = Number(updated.balance ?? 0);
+    const totalPaid = Math.max(0, -balance + outstandingAmount);
+    const enrichedSupplier = {
+      ...updated,
+      balance,
+      outstandingAmount,
+      totalPaid,
+      collectionSessions: toCollectionSessions(updated),
+    };
+    
     if (!isActive) {
       const unsettled = await countConfirmedUnsettled(tenantId, supplierId, t);
       if (unsettled > 0) {
         return {
-          supplier: updated,
+          supplier: enrichedSupplier,
           warning: `Supplier has ${unsettled} confirmed-but-unsettled collection(s). Settle dues before deactivating.`,
         };
       }
     }
-    return { supplier: updated };
+    return { supplier: enrichedSupplier };
   };
   if (tx) return run(tx);
   return withTransaction(run);
