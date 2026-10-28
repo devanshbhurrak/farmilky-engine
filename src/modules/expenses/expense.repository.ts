@@ -55,9 +55,14 @@ export async function summarizeExpenses(
     .select({
       category: transactions.txnCategory,
       total: sql<string>`COALESCE(SUM(${transactions.amount}), 0)`,
+      count: sql<number>`count(*)::int`,
     })
     .from(transactions)
     .where(and(...conds))
     .groupBy(transactions.txnCategory);
-  return rows.map((r) => ({ category: r.category ?? 'miscellaneous', total: Number(r.total) }));
+  return rows.map((r) => ({
+    category: r.category ?? 'miscellaneous',
+    total: Number(r.total),
+    count: r.count,
+  }));
 }

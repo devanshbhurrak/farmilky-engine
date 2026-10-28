@@ -33,8 +33,10 @@ import {
   getRecentOrders,
   listAddressesByUserIds,
   listUsersWithCounts,
+  removeDefaultUserAddress,
   revokeRefreshTokenByHash,
   revokeRefreshTokenById,
+  saveDefaultUserAddress,
   updateUserById,
 } from './user.repository.js';
 
@@ -253,6 +255,8 @@ export class UserService {
       balance: query.balance,
       unassigned: query.unassigned,
       search: query.search,
+      sortBy: query.sortBy,
+      sortOrder: query.sortOrder,
     };
     const [rows, total] = await Promise.all([
       listUsersWithCounts(tenantId, filters, { limit, offset }, dbOrTx),
@@ -316,6 +320,9 @@ export class UserService {
         },
         dbOrTx,
       );
+      if (input.address && Object.values(input.address).some((value) => value?.trim())) {
+        await saveDefaultUserAddress(tenantId, user.id, input.address, dbOrTx);
+      }
       if (DELIVERY_ROLES.has(user.role)) {
         await ensureAgentProfile(user.id, tenantId, dbOrTx);
       }
@@ -372,6 +379,13 @@ export class UserService {
         dbOrTx,
       );
       if (!updated) throw new AppError('User not found', 404);
+      if (input.address !== undefined) {
+        if (Object.values(input.address).some((value) => value?.trim())) {
+          await saveDefaultUserAddress(tenantId, id, input.address, dbOrTx);
+        } else {
+          await removeDefaultUserAddress(tenantId, id, dbOrTx);
+        }
+      }
       if (DELIVERY_ROLES.has(updated.role)) {
         await ensureAgentProfile(updated.id, tenantId, dbOrTx);
       }

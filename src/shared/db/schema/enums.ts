@@ -19,10 +19,27 @@ export const deliveryScheduleEnum = pgEnum('delivery_schedule', [
 ]);
 
 export const deliveryOutcomeEnum = pgEnum('delivery_outcome', [
+  'pending',
   'delivered',
   'skipped',
   'partial',
   'extra',
+  'failed',
+  'missed',
+]);
+
+export const deliveryTypeEnum = pgEnum('delivery_type', ['subscription', 'order', 'instant']);
+
+export const deliveryPaymentModeEnum = pgEnum('delivery_payment_mode', [
+  'pay_at_delivery',
+  'subscription_ledger',
+  'prepaid',
+]);
+
+export const deliveryPaymentStatusEnum = pgEnum('delivery_payment_status', [
+  'pending',
+  'paid',
+  'partially_paid',
   'failed',
 ]);
 
@@ -57,6 +74,7 @@ export const partyTypeEnum = pgEnum('party_type', ['customer', 'supplier', 'busi
 
 export const txnReferenceTypeEnum = pgEnum('txn_reference_type', [
   'subscription_delivery',
+  'delivery',
   'order',
   'milk_collection',
   'return',

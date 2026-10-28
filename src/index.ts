@@ -1,3 +1,4 @@
 // Package entry — side-effect free. Use server.ts to run the Node server,
-// worker.ts for Cloudflare Workers, app.ts (buildApp/createApp) in tests.
-export { buildApp, createApp } from './app.js';
+// worker.ts for Cloudflare Workers, app.ts (createApp) in tests.
+export { createApp } from './app.js';
+export { buildApp } from './bootstrap.js';

@@ -29,7 +29,7 @@ export const uploadProductImage = async (c: Context) => {
   }
 
   const arrayBuffer = await uploadedFile.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
+  const buffer = new Uint8Array(arrayBuffer);
 
   if (buffer.length > MAX_IMAGE_SIZE) {
     throw new AppError(`Image size exceeds ${MAX_IMAGE_SIZE / (1024 * 1024)} MB limit`, 400);

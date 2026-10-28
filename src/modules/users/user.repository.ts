@@ -1,4 +1,4 @@
-import { and, count, desc, eq, gt, ilike, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db } from '../../shared/db/client.js';
 import {
   agentProfiles,
@@ -13,9 +13,11 @@ import type { DBOrTx } from '../../shared/types/index.js';
 export interface AdminListFilters {
   role?: string;
   isActive?: string | boolean;
-  balance?: 'positive' | 'negative' | 'zero';
+  balance?: 'positive' | 'negative' | 'zero' | 'non_positive';
   unassigned?: string | boolean;
   search?: string;
+  sortBy?: 'createdAt' | 'name' | 'accountBalance';
+  sortOrder?: 'asc' | 'desc';
 }
 
 function buildUserWhere(tenantId: string, filters: AdminListFilters = {}) {
@@ -38,6 +40,8 @@ function buildUserWhere(tenantId: string, filters: AdminListFilters = {}) {
     conds.push(sql`${users.accountBalance} < 0`);
   } else if (filters.balance === 'zero') {
     conds.push(sql`${users.accountBalance} = 0`);
+  } else if (filters.balance === 'non_positive') {
+    conds.push(sql`${users.accountBalance} <= 0`);
   }
 
   if (filters.unassigned === true || filters.unassigned === 'true') {
@@ -124,6 +128,13 @@ export async function listUsersWithCounts(
   dbOrTx: DBOrTx = db,
 ) {
   const where = buildUserWhere(tenantId, filters);
+  const sortBy =
+    filters.sortBy === 'name'
+      ? users.name
+      : filters.sortBy === 'accountBalance'
+        ? users.accountBalance
+        : users.createdAt;
+  const sortDirection = filters.sortOrder === 'asc' ? asc : desc;
   const rows = await dbOrTx
     .select({
       user: users,
@@ -132,7 +143,7 @@ export async function listUsersWithCounts(
     })
     .from(users)
     .where(where)
-    .orderBy(desc(users.createdAt))
+    .orderBy(sortDirection(sortBy), asc(users.id))
     .limit(pagination.limit)
     .offset(pagination.offset);
   return rows;
@@ -163,6 +174,70 @@ export async function listAddressesByUserIds(
     list.sort((a, b) => Number(b.isDefault) - Number(a.isDefault) || a.createdAt.getTime() - b.createdAt.getTime());
   }
   return map;
+}
+
+export async function saveDefaultUserAddress(
+  tenantId: string,
+  userId: string,
+  address: { street?: string; city?: string; state?: string; pincode?: string },
+  dbOrTx: DBOrTx = db,
+): Promise<void> {
+  const addressValues = {
+    street: address.street?.trim() || null,
+    city: address.city?.trim() || null,
+    state: address.state?.trim() || null,
+    pincode: address.pincode?.trim() || null,
+    isDefault: true,
+    updatedAt: new Date(),
+  };
+  const existing = await dbOrTx
+    .select({ id: userAddresses.id })
+    .from(userAddresses)
+    .where(
+      and(
+        eq(userAddresses.tenantId, tenantId),
+        eq(userAddresses.userId, userId),
+        eq(userAddresses.isDefault, true),
+      ),
+    )
+    .orderBy(asc(userAddresses.createdAt))
+    .limit(1);
+
+  if (existing[0]) {
+    await dbOrTx
+      .update(userAddresses)
+      .set(addressValues)
+      .where(
+        and(
+          eq(userAddresses.id, existing[0].id),
+          eq(userAddresses.tenantId, tenantId),
+          eq(userAddresses.userId, userId),
+        ),
+      );
+    return;
+  }
+
+  await dbOrTx.insert(userAddresses).values({
+    tenantId,
+    userId,
+    ...addressValues,
+  });
+}
+
+export async function removeDefaultUserAddress(
+  tenantId: string,
+  userId: string,
+  dbOrTx: DBOrTx = db,
+): Promise<void> {
+  await dbOrTx
+    .delete(userAddresses)
+    .where(
+      and(
+        eq(userAddresses.tenantId, tenantId),
+        eq(userAddresses.userId, userId),
+        eq(userAddresses.isDefault, true),
+      ),
+    );
 }
 
 export async function getRecentOrders(

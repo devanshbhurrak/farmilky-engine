@@ -29,6 +29,7 @@ export interface InsertTxnRow {
   effectiveDate: string;
   referenceType?:
     | 'subscription_delivery'
+    | 'delivery'
     | 'order'
     | 'milk_collection'
     | 'return'

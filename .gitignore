@@ -4,3 +4,9 @@ dist/
 drizzle/
 *.log
 coverage/
+
+# wrangler
+.wrangler/
+dist-worker/
+.dev.vars
+

@@ -4,6 +4,7 @@ export * from './users.js';
 export * from './products.js';
 export * from './areas.js';
 export * from './cart.js';
+export * from './deliveries.js';
 export * from './orders.js';
 export * from './subscriptions.js';
 export * from './invoices.js';

@@ -10,7 +10,20 @@ export interface AuthUser {
   role: string;
 }
 
+export interface DurableObjectStubLike {
+  fetch(request: Request): Promise<Response>;
+}
+
+export interface DurableObjectNamespaceLike {
+  idFromName(name: string): unknown;
+  get(id: unknown): DurableObjectStubLike;
+}
+
 export type HonoEnv = {
+  Bindings: {
+    SSE_HUB?: DurableObjectNamespaceLike;
+    [key: string]: unknown;
+  };
   Variables: {
     user: AuthUser;
     body: unknown;

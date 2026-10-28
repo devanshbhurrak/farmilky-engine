@@ -1,6 +1,16 @@
 type SSEStream = { send: (event: string, data: unknown) => void };
+type RemoteBroadcaster = (key: string, event: { type: string; [k: string]: unknown }) => void;
 
 const connections = new Map<string, Set<SSEStream>>();
+let remoteBroadcaster: RemoteBroadcaster | undefined;
+
+/**
+ * In Workers an SSE connection lives inside one isolate. Broadcasts from other
+ * isolates are forwarded to the SseHub Durable Object through this hook.
+ */
+export function configureRemoteBroadcast(fn: RemoteBroadcaster | undefined): void {
+  remoteBroadcaster = fn;
+}
 
 export function subscribe(key: string, stream: SSEStream): void {
   let set = connections.get(key);
@@ -19,6 +29,13 @@ export function unsubscribe(key: string, stream: SSEStream): void {
 }
 
 export function broadcast(key: string, event: { type: string; [k: string]: unknown }): void {
+  if (remoteBroadcaster) {
+    try {
+      remoteBroadcaster(key, event);
+    } catch {
+      // Fall through to local delivery; remote hub is best-effort.
+    }
+  }
   connections.get(key)?.forEach((s) => {
     try {
       s.send(event.type, JSON.stringify(event));

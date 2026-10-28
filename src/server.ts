@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { serve } from '@hono/node-server';
-import { buildApp } from './app.js';
+import { buildApp } from './bootstrap.js';
 import { env } from './shared/config/env.js';
 import { logger } from './shared/utils/logger.js';
 

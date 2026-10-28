@@ -1,21 +1,14 @@
-import { Hono } from 'hono';
+﻿import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
-import { validateEnv, env } from './shared/config/env.js';
+import { env } from './shared/config/env.js';
 import { logger } from './shared/utils/logger.js';
-import { db, connectDB } from './shared/db/client.js';
-import { tenants } from './shared/db/schema/index.js';
-import { eq } from 'drizzle-orm';
+import { db } from './shared/db/client.js';
 import type { HonoEnv } from './shared/types/index.js';
-import { initCache, getCache } from './shared/cache/index.js';
-import { initJobQueue, registerRecurringJobs } from './shared/jobs/index.js';
-import { registerProcessors } from './shared/jobs/registerProcessors.js';
+import { getCache } from './shared/cache/index.js';
 import { onError } from './shared/middleware/errorHandler.js';
 import { createLimiter } from './shared/middleware/rateLimiter.js';
-import { generateManifestsForDate } from './modules/manifests/manifest.service.js';
-import { istToday, toDateOnlyString } from './shared/utils/dateUtils.js';
-import { withTransaction } from './shared/db/transaction.js';
 
 import { tenantRoutes } from './modules/tenants/tenant.routes.js';
 import { userRoutes } from './modules/users/user.routes.js';
@@ -39,6 +32,7 @@ import { supplierPaymentRoutes } from './modules/supplier-payments/supplierPayme
 import { permissionRoutes } from './modules/permissions/permission.routes.js';
 import { contactRoutes } from './modules/contact/contact.routes.js';
 import { transactionRoutes } from './modules/transactions/transaction.routes.js';
+import { deliveryRoutes } from './modules/deliveries/delivery.routes.js';
 import { utilsRoutes } from './modules/utils/utils.routes.js';
 import { upiRoutes } from './modules/upi/upi.routes.js';
 import { sseRoutes } from './modules/sse/sse.routes.js';
@@ -46,12 +40,29 @@ import { cronRoutes } from './modules/cron/cron.routes.js';
 import { uploadRoutes } from './modules/uploads/upload.routes.js';
 import { serveImage } from './modules/uploads/upload.controller.js';
 
-// Pure route assembly — no I/O, no side effects. Safe to import anywhere
+// Pure route assembly â€” no I/O, no side effects. Safe to import anywhere
 // (tests, Cloudflare Workers) without connecting to the database.
 export function createApp() {
   const app = new Hono<HonoEnv>();
 
-  app.use('*', cors({ origin: env.allowedOrigins.length ? env.allowedOrigins : '*', credentials: true }));
+  app.use(
+    '*',
+    cors({
+      origin: (origin) => {
+        const allowedOrigins = env.allowedOrigins;
+        if (allowedOrigins.includes(origin)) return origin;
+        if (
+          allowedOrigins.length === 0 &&
+          env.nodeEnv !== 'production' &&
+          /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/.test(origin)
+        ) {
+          return origin;
+        }
+        return undefined;
+      },
+      credentials: true,
+    }),
+  );
   app.use('*', async (c, next) => {
     c.set('requestId', randomUUID());
     const start = Date.now();
@@ -88,6 +99,7 @@ export function createApp() {
   app.route('/api/products', productRoutes);
   app.route('/api/cart', cartRoutes);
   app.route('/api/orders', orderRoutes);
+  app.route('/api/deliveries', deliveryRoutes);
   app.route('/api/subscriptions', subscriptionRoutes);
   app.route('/api/manifests', manifestRoutes);
   app.route('/api/payments', paymentRoutes);
@@ -112,7 +124,7 @@ export function createApp() {
     app.use('/api/utils/*', utilsLimiter);
   app.route('/api/utils', utilsRoutes);
 
-  // Public image proxy — serves R2 images through authenticated backend access.
+  // Public image proxy â€” serves R2 images through authenticated backend access.
   // Must be registered BEFORE uploadRoutes to bypass the auth/adminOnly middleware.
   app.get('/api/upload/image/serve', serveImage);
   app.route('/api/upload', uploadRoutes);
@@ -123,46 +135,4 @@ export function createApp() {
   app.onError(onError);
 
   return app;
-}
-
-// Full Node startup: infra init + route assembly. Used by server.ts and tests.
-export async function buildApp() {
-  validateEnv();
-  await connectDB();
-  initCache();
-  const queue = initJobQueue();
-  registerProcessors(queue);
-  await registerRecurringJobs(queue).catch((err) => logger.error({ err }, 'Failed to register recurring jobs'));
-  queue.startWorkers();
-
-  // Idempotent: generate today's manifests for all active tenants.
-  // Runs in the background so the server starts listening immediately.
-  void (async () => {
-    try {
-      const activeTenants = await db.select({ id: tenants.id }).from(tenants).where(eq(tenants.isActive, true));
-      const today = toDateOnlyString(istToday());
-      for (const t of activeTenants) {
-        try {
-          await withTransaction(async (tx) => {
-            await tx.execute(sql`SELECT set_config('app.tenant_id', ${t.id}, true)`);
-            await generateManifestsForDate(t.id, today, 'morning', tx, tx);
-          });
-        } catch (err) {
-          logger.error({ err, tenantId: t.id }, 'Startup morning manifest generation failed');
-        }
-        try {
-          await withTransaction(async (tx) => {
-            await tx.execute(sql`SELECT set_config('app.tenant_id', ${t.id}, true)`);
-            await generateManifestsForDate(t.id, today, 'evening', tx, tx);
-          });
-        } catch (err) {
-          logger.error({ err, tenantId: t.id }, 'Startup evening manifest generation failed');
-        }
-      }
-    } catch (err) {
-      logger.error({ err }, 'Startup manifest generation failed');
-    }
-  })();
-
-  return createApp();
 }

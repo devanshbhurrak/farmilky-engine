@@ -34,6 +34,7 @@ export async function createExpense(
         amount: input.amount,
         effectiveDate: input.effectiveDate ?? input.date ?? toDateOnlyString(istToday()),
         paymentMethod: input.paymentMethod ?? null,
+        paymentRef: input.receiptReference?.trim() || null,
         description: input.description,
         notes: input.notes ?? null,
         createdById: adminId,
@@ -56,6 +57,9 @@ export async function updateExpense(
     const patch: Partial<CreateTxnParams> = {};
     if (rest.amount !== undefined) patch.amount = rest.amount;
     if (rest.description !== undefined) patch.description = rest.description;
+    if (rest.receiptReference !== undefined) {
+      patch.paymentRef = rest.receiptReference.trim() || null;
+    }
     if (rest.notes !== undefined) patch.notes = rest.notes;
     if (rest.effectiveDate !== undefined || rest.date !== undefined) {
       patch.effectiveDate = rest.effectiveDate ?? rest.date;
@@ -104,5 +108,6 @@ export async function expenseSummary(tenantId: string, query: ExpenseSummaryQuer
     dbOrTx,
   );
   const total = round2(breakdown.reduce((sum, r) => sum + r.total, 0));
-  return { breakdown, total };
+  const count = breakdown.reduce((sum, r) => sum + r.count, 0);
+  return { breakdown, total, count };
 }

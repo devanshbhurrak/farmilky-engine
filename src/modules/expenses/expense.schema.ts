@@ -21,6 +21,7 @@ export const createExpenseSchema = z.object({
   // 'date' is the field name used by the frontend form — accepted as alias for effectiveDate
   date: dateString.optional(),
   description: z.string().min(1),
+  receiptReference: z.string().trim().max(200).optional(),
   notes: z.string().optional(),
   paymentMethod: z.enum(['cash', 'upi', 'bank_transfer', 'card', 'online', 'COD']).optional(),
 });
@@ -30,6 +31,7 @@ export const updateExpenseSchema = z.object({
   void_reason: z.string().min(1).default('Admin action'),
   amount: z.number().positive().optional(),
   description: z.string().min(1).optional(),
+  receiptReference: z.string().trim().max(200).optional(),
   notes: z.string().optional(),
   category: expenseCategorySchema.optional(),
   effectiveDate: dateString.optional(),

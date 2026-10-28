@@ -5,12 +5,11 @@
  * payment options (UPI QR). Accepts both the v2 drizzle row shape and the
  * legacy mongoose shape via a normalizer.
  */
-import PDFDocument from 'pdfkit';
-import QRCode from 'qrcode';
 import { and, eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { invoiceLineItems, invoiceProductSummary, invoices, tenants, users } from '../db/schema/index.js';
 import type { DBOrTx } from '../types/index.js';
+import { env, isWorkersRuntime } from '../config/env.js';
 
 // ── Public input types ──────────────────────────────────────────────────────
 export interface PdfCustomer {
@@ -86,6 +85,22 @@ export interface PdfOptions {
   upiName?: string;
   phone?: string;
   tenantId?: string;
+}
+
+// Lazily load Node-only PDF renderers so they are not statically bundled into
+// the Cloudflare Worker. Throws a clear error when called from the Workers runtime.
+let pdfRenderers: { PDFDocument: unknown; QRCode: unknown } | undefined;
+async function loadPdfRenderers(): Promise<{ PDFDocument: unknown; QRCode: unknown }> {
+  if (pdfRenderers) return pdfRenderers;
+  if (isWorkersRuntime()) {
+    throw new Error(
+      'PDF generation is not available in Cloudflare Workers. pdfkit/qrcode require a Node.js runtime.',
+    );
+  }
+  const PDFDocumentModule = await import('pdfkit/js/pdfkit.standalone.js');
+  const QRCodeModule = await import('qrcode');
+  pdfRenderers = { PDFDocument: PDFDocumentModule.default, QRCode: QRCodeModule.default };
+  return pdfRenderers;
 }
 
 // ── Brand / palette ─────────────────────────────────────────────────────────
@@ -415,10 +430,11 @@ export async function generateInvoicePDF(
 
 // ── Renderer ────────────────────────────────────────────────────────────────
 async function renderPdf(norm: NormInvoice, tenant: PdfTenant | null, opts: PdfOptions): Promise<Buffer> {
+  const { PDFDocument, QRCode } = await loadPdfRenderers();
   const brandName = (tenant?.name ?? 'FARMILKY').toUpperCase();
-  const brandPhone = opts.phone ?? tenant?.brandPhone ?? process.env.BRAND_PHONE ?? '9244237975';
-  const upiId = (opts.upiId ?? tenant?.upiId ?? process.env.UPI_ID ?? '').trim();
-  const upiName = (opts.upiName ?? tenant?.upiName ?? process.env.UPI_NAME ?? 'Farmilky').trim();
+  const brandPhone = opts.phone ?? tenant?.brandPhone ?? env.brandPhone;
+  const upiId = (opts.upiId ?? tenant?.upiId ?? env.upiId).trim();
+  const upiName = (opts.upiName ?? tenant?.upiName ?? env.upiName).trim();
   const detailed = opts.detailed ?? false;
 
   let upiUri: string | null = null;
@@ -432,14 +448,14 @@ async function renderPdf(norm: NormInvoice, tenant: PdfTenant | null, opts: PdfO
       tn: `Farmilky Invoice ${norm.invoiceNumber}`,
     });
     upiUri = `upi://pay?${params.toString()}`;
-    const backendUrl = (process.env.BACKEND_URL ?? '').replace(/\/$/, '');
+    const backendUrl = env.backendUrl.replace(/\/$/, '');
     tapLink = backendUrl ? `${backendUrl}/pay/upi?${params.toString()}` : upiUri;
   }
 
   let qrBuffer: Buffer | null = null;
   if (upiUri) {
     try {
-      qrBuffer = await QRCode.toBuffer(upiUri, {
+      qrBuffer = await (QRCode as any).toBuffer(upiUri, {
         type: 'png',
         width: 200,
         margin: 1,
@@ -452,7 +468,7 @@ async function renderPdf(norm: NormInvoice, tenant: PdfTenant | null, opts: PdfO
 
   return new Promise<Buffer>((resolve, reject) => {
     const M = 30;
-    const doc = new PDFDocument({
+    const doc = new (PDFDocument as any)({
       margins: { top: M, left: M, right: M, bottom: 0 },
       size: 'A4',
       autoFirstPage: true,

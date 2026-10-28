@@ -12,6 +12,7 @@ import type { DBOrTx } from '../types/index.js';
 import { generateInvoiceNumber } from '../utils/invoiceNumber.js';
 import { istToday, round2, toDateOnlyString } from '../utils/dateUtils.js';
 import { logger } from '../utils/logger.js';
+import { env } from '../config/env.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { findActiveByPartyAndPeriod } from '../../modules/transactions/transaction.repository.js';
 import * as invoiceRepo from '../../modules/invoices/invoice.repository.js';
@@ -575,9 +576,9 @@ export async function getMyInvoiceDetail(
   ]);
   const tenant = tenantRows[0];
   const brandConfig = {
-    phone: tenant?.brandPhone ?? process.env.BRAND_PHONE ?? '9244237975',
-    upiId: tenant?.upiId ?? process.env.UPI_ID ?? '',
-    upiName: tenant?.upiName ?? process.env.UPI_NAME ?? 'Farmilky',
+    phone: tenant?.brandPhone ?? env.brandPhone,
+    upiId: tenant?.upiId ?? env.upiId,
+    upiName: tenant?.upiName ?? env.upiName,
   };
   return { invoice, lineItems, productSummary: summary, brandConfig };
 }
