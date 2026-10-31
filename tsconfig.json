@@ -16,7 +16,6 @@
     "sourceMap": true,
     "outDir": "./dist",
     "rootDir": ".",
-    "ignoreDeprecations": "5.0",
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]

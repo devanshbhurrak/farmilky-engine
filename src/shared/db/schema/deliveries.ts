@@ -101,10 +101,18 @@ export const deliveryItems = pgTable(
     quantity: numeric('quantity', { precision: 10, scale: 3 }).notNull(),
     unitPrice: numeric('unit_price', { precision: 10, scale: 2 }).notNull(),
     amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+    // Actual delivered quantity for this item (may differ from scheduled
+    // `quantity` on partial/failed/skipped outcomes).
+    deliveredQuantity: numeric('delivered_quantity', { precision: 10, scale: 3 }),
+    // Per-item outcome: pending / delivered / partial / failed / skipped.
+    itemStatus: deliveryOutcomeEnum('item_status').notNull().default('pending'),
+    failureReason: text('failure_reason'),
+    failureNotes: text('failure_notes'),
   },
   (t) => [
     index('delivery_items_delivery_idx').on(t.deliveryId),
     index('delivery_items_product_idx').on(t.productId),
+    index('delivery_items_status_idx').on(t.deliveryId, t.itemStatus),
     check('delivery_items_qty_check', sql`${t.quantity} > 0`),
     check('delivery_items_amount_nonneg', sql`${t.amount} >= 0`),
   ],

@@ -133,11 +133,17 @@ export const transactionSettlements = pgTable(
       .notNull()
       .references(() => transactions.id),
     amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+    status: text('status').notNull().default('active'), // 'active' | 'reversed'
+    reversedAt: timestamp('reversed_at', { withTimezone: true }),
+    reversedByTxnId: uuid('reversed_by_txn_id'),
+    notes: text('notes'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    index('txn_settle_tenant_idx').on(t.tenantId),
     index('txn_settle_payment_idx').on(t.settlementTxnId),
     index('txn_settle_settled_idx').on(t.settledTxnId),
+    index('txn_settle_status_idx').on(t.tenantId, t.status),
     check('txn_settle_amount_check', sql`${t.amount} > 0`),
   ],
 );

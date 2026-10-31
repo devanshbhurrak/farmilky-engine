@@ -6,6 +6,7 @@ import { istToday, toDateOnlyString } from '../../shared/utils/dateUtils.js';
 import { buildMeta, parsePagination } from '../../shared/utils/pagination.js';
 import { transactionService, type CreateTxnParams } from '../transactions/transaction.service.js';
 import { updateTransaction } from '../transactions/transaction.repository.js';
+import { settlementService } from '../transactions/settlement.service.js';
 import {
   findPaymentById,
   listCustomerLedgerForPeriod,
@@ -19,24 +20,12 @@ import type {
   UpdatePaymentInput,
 } from './payment.schema.js';
 
-function fireInvoiceSync(tenantId: string, userId: string, effectiveDate?: string): void {
+async function fireInvoiceSync(tenantId: string, userId: string, effectiveDate?: string): Promise<void> {
   try {
-    const specifier = '../invoices/invoice.service.js';
-    const pending: Promise<unknown> = import(specifier);
-    void pending
-      .then((m) => {
-        const mod = m as {
-          syncInvoiceStatusAfterPayment?: (tenantId: string, userId: string, effectiveDate?: string) => unknown;
-        };
-        try {
-          mod.syncInvoiceStatusAfterPayment?.(tenantId, userId, effectiveDate);
-        } catch {
-          // invoice sync must never break the main flow
-        }
-      })
-      .catch(() => undefined);
+    const { syncInvoiceStatusAfterPayment } = await import('../../shared/services/invoiceService.js');
+    await syncInvoiceStatusAfterPayment(tenantId, userId, effectiveDate);
   } catch {
-    // invoices module may not exist yet
+    // invoice sync must never break the main flow
   }
 }
 
@@ -68,12 +57,16 @@ export async function recordPayment(
       },
       t,
     );
+
+    // Automatic FIFO settlement across open customer debits
+    await settlementService.allocateFifo(tenantId, txn.id, t);
+
     syncUserId = input.userId;
     syncDate = effectiveDate;
     return txn;
   };
   const result = tx ? await run(tx) : await withTransaction(run);
-  if (syncUserId) fireInvoiceSync(tenantId, syncUserId, syncDate);
+  if (syncUserId) await fireInvoiceSync(tenantId, syncUserId, syncDate);
   return result;
 }
 

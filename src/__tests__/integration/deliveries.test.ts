@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { dbOnly, tenantSlug } from './helpers.js';
+import { AppError } from '../../shared/middleware/errorHandler.js';
 
 async function setupTenant(slug: string) {
   const { TenantService } = await import('../../modules/tenants/tenant.service.js');
@@ -58,9 +59,10 @@ async function createSubDeliveryContext(slug: string) {
   return { tenantId, adminId, userId, product, variantId, sub };
 }
 
-const { recordDeliveryOutcome, correctDelivery, rescheduleDelivery, cancelDelivery, recordPaymentAgainstDelivery, markMissedDeliveries, getCustomerDeliverySummary } = await import(
+const { recordDeliveryOutcome, correctDelivery, rescheduleDelivery, cancelDelivery, recordPaymentAgainstDelivery, markMissedDeliveries, getCustomerDeliverySummary, confirmUnconfirmedDeliveries } = await import(
   '../../modules/deliveries/delivery.service.js'
 );
+const { findDeliveryWithItems } = await import('../../modules/deliveries/delivery.repository.js');
 const { toDateOnlyString, istToday, addDays } = await import('../../shared/utils/dateUtils.js');
 
 dbOnly('deliveries – subscription workflow', () => {
@@ -129,7 +131,7 @@ dbOnly('deliveries – subscription workflow', () => {
     const corrected = await correctDelivery(
       tenantId,
       first.delivery.id,
-      { status: 'delivered', actualQuantity: 1, pricePerPacket: 60, reason: 'customer took 1' },
+      { status: 'partial', actualQuantity: 1, pricePerPacket: 60, reason: 'customer took 1' },
       adminId,
       Number(first.delivery.version),
     );
@@ -240,6 +242,7 @@ dbOnly('deliveries – reschedule, payment, missed, summary', () => {
     const slug = tenantSlug();
     const { tenantId, adminId, userId, sub } = await createSubDeliveryContext(slug);
     const today = toDateOnlyString(istToday());
+    const yesterday = toDateOnlyString(addDays(new Date(today), -1));
 
     await recordDeliveryOutcome(
       tenantId,
@@ -248,13 +251,256 @@ dbOnly('deliveries – reschedule, payment, missed, summary', () => {
     );
     await recordDeliveryOutcome(
       tenantId,
-      { customerId: userId, type: 'subscription', referenceType: 'subscription', referenceId: sub.id, deliveryDate: today, deliverySlot: 'morning', status: 'missed', reason: 'not attempted' },
+      { customerId: userId, type: 'subscription', referenceType: 'subscription', referenceId: sub.id, deliveryDate: yesterday, deliverySlot: 'morning', status: 'missed', reason: 'not attempted' },
       adminId,
     );
 
-    const summary = await getCustomerDeliverySummary(tenantId, { customerId: userId, fromDate: today, toDate: today });
+    const summary = await getCustomerDeliverySummary(tenantId, { customerId: userId, fromDate: yesterday, toDate: today });
     expect(summary.deliveredCount).toBe(1);
     expect(summary.missedCount).toBe(1);
     expect(summary.totalCharges).toBe(120);
   });
 });
+
+dbOnly('deliveries – per-item outcomes and ledger consistency', () => {
+  it('partial per-item delivery debits only actual qty and stores item outcomes', async () => {
+    const slug = tenantSlug();
+    const { tenantId, adminId, userId, sub, product, variantId } = await createSubDeliveryContext(slug);
+    const today = toDateOnlyString(istToday());
+
+    // Two products scheduled: 2L milk @ 60 = 120 scheduled
+    const result = await recordDeliveryOutcome(
+      tenantId,
+      {
+        customerId: userId,
+        type: 'subscription',
+        referenceType: 'subscription',
+        referenceId: sub.id,
+        deliveryDate: today,
+        deliverySlot: 'morning',
+        status: 'partial',
+        items: [
+          {
+            productId: product.id,
+            variantId,
+            productName: 'Milk 1L',
+            unit: 'L',
+            quantity: 2,
+            unitPrice: 60,
+            deliveredQuantity: 1,
+            itemStatus: 'partial',
+          },
+        ],
+      },
+      adminId,
+    );
+
+    expect(result.delivery.status).toBe('partial');
+    expect(Number(result.delivery.actualQuantity)).toBe(1);
+    expect(Number(result.delivery.totalAmount)).toBe(60);
+    expect(result.transactionId).toBeTruthy();
+    expect(await getBalance(userId)).toBe(60);
+
+    const item = result.items[0];
+    expect(item.itemStatus).toBe('partial');
+    expect(Number(item.deliveredQuantity)).toBe(1);
+  });
+
+  it('whole delivery failed records reason, no charge, no stock change', async () => {
+    const slug = tenantSlug();
+    const { tenantId, adminId, userId, sub, product, variantId } = await createSubDeliveryContext(slug);
+    const today = toDateOnlyString(istToday());
+
+    const result = await recordDeliveryOutcome(
+      tenantId,
+      {
+        customerId: userId,
+        type: 'subscription',
+        referenceType: 'subscription',
+        referenceId: sub.id,
+        deliveryDate: today,
+        deliverySlot: 'morning',
+        status: 'failed',
+        reason: 'customer unavailable',
+        items: [
+          {
+            productId: product.id,
+            variantId,
+            productName: 'Milk 1L',
+            unit: 'L',
+            quantity: 2,
+            unitPrice: 60,
+            deliveredQuantity: 0,
+            itemStatus: 'failed',
+            failureReason: 'customer unavailable',
+          },
+        ],
+      },
+      adminId,
+    );
+
+    expect(result.delivery.status).toBe('failed');
+    expect(result.transactionId).toBeNull();
+    expect(result.ledgerChanged).toBe(false);
+    expect(await getBalance(userId)).toBe(0);
+    expect(result.items[0].failureReason).toBe('customer unavailable');
+    expect(result.items[0].itemStatus).toBe('failed');
+  });
+
+  it('customer-requested skip is skipped, no charge, distinguished from failed', async () => {
+    const slug = tenantSlug();
+    const { tenantId, adminId, userId, sub, product, variantId } = await createSubDeliveryContext(slug);
+    const today = toDateOnlyString(istToday());
+
+    const result = await recordDeliveryOutcome(
+      tenantId,
+      {
+        customerId: userId,
+        type: 'subscription',
+        referenceType: 'subscription',
+        referenceId: sub.id,
+        deliveryDate: today,
+        deliverySlot: 'morning',
+        status: 'skipped',
+        reason: 'customer requested skip',
+        items: [
+          {
+            productId: product.id,
+            variantId,
+            productName: 'Milk 1L',
+            unit: 'L',
+            quantity: 2,
+            unitPrice: 60,
+            deliveredQuantity: 0,
+            itemStatus: 'skipped',
+          },
+        ],
+      },
+      adminId,
+    );
+
+    expect(result.delivery.status).toBe('skipped');
+    expect(result.transactionId).toBeNull();
+    expect(await getBalance(userId)).toBe(0);
+    expect(result.items[0].itemStatus).toBe('skipped');
+    expect(result.items[0].failureReason).toBeNull();
+  });
+
+  it('duplicate retry via idempotency key does not double-charge', async () => {
+    const slug = tenantSlug();
+    const { tenantId, adminId, userId, sub } = await createSubDeliveryContext(slug);
+    const today = toDateOnlyString(istToday());
+    const key = `idem-test-${slug}-${today}`;
+
+    const first = await recordDeliveryOutcome(
+      tenantId,
+      { customerId: userId, type: 'subscription', referenceType: 'subscription', referenceId: sub.id, deliveryDate: today, deliverySlot: 'morning', status: 'delivered', idempotencyKey: key },
+      adminId,
+    );
+    expect(await getBalance(userId)).toBe(120);
+
+    const second = await recordDeliveryOutcome(
+      tenantId,
+      { customerId: userId, type: 'subscription', referenceType: 'subscription', referenceId: sub.id, deliveryDate: today, deliverySlot: 'morning', status: 'delivered', idempotencyKey: key },
+      adminId,
+    );
+    expect(second.transactionId).toBeNull();
+    expect(second.delivery.id).toBe(first.delivery.id);
+    expect(await getBalance(userId)).toBe(120);
+  });
+
+  it('correcting a delivered delivery reverses old charge and re-charges actual qty', async () => {
+    const slug = tenantSlug();
+    const { tenantId, adminId, userId, sub, product, variantId } = await createSubDeliveryContext(slug);
+    const today = toDateOnlyString(istToday());
+
+    const first = await recordDeliveryOutcome(
+      tenantId,
+      { customerId: userId, type: 'subscription', referenceType: 'subscription', referenceId: sub.id, deliveryDate: today, deliverySlot: 'morning', status: 'delivered' },
+      adminId,
+    );
+    expect(await getBalance(userId)).toBe(120);
+
+    const found = await findDeliveryWithItems(tenantId, first.delivery.id);
+    const corrected = await correctDelivery(
+      tenantId,
+      first.delivery.id,
+      { status: 'partial', actualQuantity: 1, pricePerPacket: 60, reason: 'customer took 1' },
+      adminId,
+      Number(found!.delivery.version),
+    );
+
+    expect(await getBalance(userId)).toBe(60);
+    expect(Number(corrected.delivery.totalAmount)).toBe(60);
+    expect(Number(corrected.delivery.actualQuantity)).toBe(1);
+    expect(corrected.delivery.version).toBe(Number(found!.delivery.version) + 1);
+  });
+
+  it('concurrent correction with stale version returns 409', async () => {
+    const slug = tenantSlug();
+    const { tenantId, adminId, userId, sub } = await createSubDeliveryContext(slug);
+    const today = toDateOnlyString(istToday());
+
+    const first = await recordDeliveryOutcome(
+      tenantId,
+      { customerId: userId, type: 'subscription', referenceType: 'subscription', referenceId: sub.id, deliveryDate: today, deliverySlot: 'morning', status: 'delivered' },
+      adminId,
+    );
+
+    const found = await findDeliveryWithItems(tenantId, first.delivery.id);
+    // Mutate version by making another correction first
+    await correctDelivery(
+      tenantId,
+      first.delivery.id,
+      { status: 'partial', actualQuantity: 1, pricePerPacket: 60, reason: 'first correction' },
+      adminId,
+      Number(found!.delivery.version),
+    );
+
+    // Now try correcting with the stale version
+    let error: Error | null = null;
+    try {
+      await correctDelivery(
+        tenantId,
+        first.delivery.id,
+        { status: 'partial', actualQuantity: 1, pricePerPacket: 60, reason: 'stale' },
+        adminId,
+        Number(found!.delivery.version),
+      );
+    } catch (err) {
+      error = err as Error;
+    }
+    expect(error).not.toBeNull();
+    expect((error as AppError).status).toBe(409);
+  });
+
+  it('bulk confirmation charges each delivery on its own date and is idempotent', async () => {
+    const slug = tenantSlug();
+    const { tenantId, adminId, userId, sub, product, variantId } = await createSubDeliveryContext(slug);
+    const today = toDateOnlyString(istToday());
+    const yesterday = toDateOnlyString(addDays(new Date(today), -1));
+
+    // Create pending deliveries for yesterday and today
+    await recordDeliveryOutcome(
+      tenantId,
+      { customerId: userId, type: 'subscription', referenceType: 'subscription', referenceId: sub.id, deliveryDate: yesterday, deliverySlot: 'morning', status: 'pending' },
+      adminId,
+    );
+    await recordDeliveryOutcome(
+      tenantId,
+      { customerId: userId, type: 'subscription', referenceType: 'subscription', referenceId: sub.id, deliveryDate: today, deliverySlot: 'morning', status: 'pending' },
+      adminId,
+    );
+
+    // Bulk confirm only yesterday (days=1 covers yesterday only since cursorEnd = today-1)
+    const result = await confirmUnconfirmedDeliveries(tenantId, { days: 1 }, adminId);
+    expect(result.confirmed).toBeGreaterThanOrEqual(1);
+    expect(await getBalance(userId)).toBe(120);
+
+    // Re-run: no new charges (idempotent via existing delivery records)
+    const result2 = await confirmUnconfirmedDeliveries(tenantId, { days: 1 }, adminId);
+    expect(result2.failed).toBe(0);
+    expect(await getBalance(userId)).toBe(120);
+  });
+});
+

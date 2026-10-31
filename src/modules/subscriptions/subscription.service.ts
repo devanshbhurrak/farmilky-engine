@@ -23,6 +23,10 @@ import { decrementVariantStock, resolvePrice } from '../products/product.service
 import { decrementProductStockRow, findOrderItemsForBoard, incrementProductStockRow, type Order } from '../orders/order.repository.js';
 import { getTenantSettings } from '../tenants/tenant.settings.js';
 import { transactionService } from '../transactions/transaction.service.js';
+import {
+  findDeliveryLedgerForDate,
+  insertDeliveryIfAbsent,
+} from '../deliveries/delivery.repository.js';
 import type { Subscription, SubscriptionDelivery, UserAddress } from '../../shared/db/schema/index.js';
 import type { subscriptionChanges } from '../../shared/db/schema/index.js';
 import {
@@ -38,10 +42,10 @@ import {
   findBoardAreas,
   findBoardProducts,
   findBoardUsers,
-  findDeliveriesForDate,
   findDeliveryById,
   findDeliveryBySubscriptionAndDate,
   findSubscriptionById,
+  findSubscriptionDeliveriesForDate,
   insertDelivery,
   insertSubscription,
   insertSubscriptionChange,
@@ -54,6 +58,7 @@ import {
   listSubscriptionSlots,
   listSubscriptionSlotsForSubs,
   listSubscriptionsAdmin,
+  listSubscriptionsByIds,
   listSubscriptionsByUser,
   updateSubscriptionRow,
   updateSubscriptionSlotQty,
@@ -240,12 +245,23 @@ async function decrementStockForDelivery(
 ): Promise<void> {
   if (!(qty > 0)) return;
   if (variantId) {
-    await decrementVariantStock(tenantId, variantId, qty, dbOrTx);
+    try {
+      await decrementVariantStock(tenantId, variantId, qty, dbOrTx);
+    } catch (err) {
+      if (err instanceof AppError && err.status === 409) {
+        // Stock check disabled on delivery: log warning instead of throwing
+        logger.warn({ tenantId, variantId, qty }, 'Insufficient stock for variant on delivery — skipping stock decrement');
+        return;
+      }
+      throw err;
+    }
     return;
   }
   const updated = await decrementProductStockRow(tenantId, productId, qty, dbOrTx);
   if (updated.length === 0) {
-    throw new AppError('Insufficient stock for product', 409);
+    // Stock check disabled on delivery: log warning instead of throwing
+    logger.warn({ tenantId, productId, qty }, 'Insufficient stock for product on delivery — skipping stock decrement');
+    return;
   }
 }
 
@@ -1594,9 +1610,11 @@ export interface BoardEntry {
   subscriptionId: string | null;
   deliverySlot: DeliverySlot | null;
   orderId: string | null;
+  deliveryId: string | null;
   productId: string | null;
   productName: string | null;
   unit: string | null;
+  pricePerPacket?: number | null;
   deliveryStatus: string;
   quantity: number;
   scheduledQuantity: number;
@@ -1605,9 +1623,161 @@ export interface BoardEntry {
   outcome: { actualQuantity?: number; notes?: string | null } | null;
   canRecordOutcome: boolean;
   sequence: number | null;
+  items?: Array<{
+    productId: string;
+    variantId?: string | null;
+    productName: string;
+    variantLabel?: string | null;
+    unit?: string | null;
+    quantity: number;
+    deliveredQuantity: number;
+    unitPrice: number;
+    itemStatus: string;
+  }>;
 }
 
 type SubWithSlots = Subscription & { slots?: Array<{ slot: DeliverySlot; quantityPerDelivery: number }> };
+
+type DeliveryLedgerRow = Awaited<ReturnType<typeof findDeliveryLedgerForDate>>[number];
+
+function ledgerKey(referenceId: string | null, slot: string | null): string | null {
+  return referenceId ? `${referenceId}|${slot ?? ''}` : null;
+}
+
+/**
+ * Materialize one `pending` canonical delivery-ledger row per due
+ * subscription slot for `date`. Idempotent: existing canonical rows (any
+ * status) and legacy `subscription_deliveries` outcomes are both treated as
+ * already recorded, so reloading the board never duplicates work.
+ */
+async function ensureSubscriptionDeliveryRows(
+  tenantId: string,
+  date: string,
+  subs: SubWithSlots[],
+  slot: DeliverySlot | undefined,
+  dbOrTx: DBOrTx,
+  ledgerRows?: DeliveryLedgerRow[],
+  legacyRows?: SubscriptionDelivery[],
+): Promise<number> {
+  if (date > todayStr() || subs.length === 0) return 0;
+
+  const [ledger, legacy] = await Promise.all([
+    ledgerRows ?? findDeliveryLedgerForDate(tenantId, date, 'subscription', dbOrTx),
+    legacyRows ?? findSubscriptionDeliveriesForDate(tenantId, date, dbOrTx),
+  ]);
+
+  const seen = new Set<string>();
+  for (const row of ledger) {
+    const key = ledgerKey(row.referenceId, row.deliverySlot);
+    if (key) seen.add(key);
+  }
+  for (const row of legacy) seen.add(`${row.subscriptionId}|${row.deliverySlot}`);
+
+  let created = 0;
+  for (const sub of subs) {
+    const configuredSlots =
+      sub.slots?.length
+        ? sub.slots
+        : [{ slot: sub.deliverySlot as DeliverySlot, quantityPerDelivery: num(sub.quantityPerDelivery) }];
+    for (const configured of configuredSlots) {
+      if (slot && configured.slot !== slot) continue;
+      const key = `${sub.id}|${configured.slot}`;
+      if (seen.has(key)) continue;
+      const qty = num(configured.quantityPerDelivery);
+      const inserted = await insertDeliveryIfAbsent(
+        {
+          tenantId,
+          customerId: sub.userId,
+          type: 'subscription',
+          referenceType: 'subscription',
+          referenceId: sub.id,
+          deliveryDate: date,
+          deliverySlot: configured.slot,
+          status: 'pending',
+          scheduledQuantity: String(qty),
+          actualQuantity: null,
+          pricePerPacket: sub.pricePerPacket,
+          totalAmount: '0',
+          paymentStatus: 'pending',
+          idempotencyKey: `subscription-pending:${sub.id}:${date}:${configured.slot}`,
+        },
+        dbOrTx,
+      );
+      if (inserted) {
+        created += 1;
+        seen.add(key);
+      }
+    }
+  }
+  return created;
+}
+
+/**
+ * Backfill canonical pending rows for every subscription due on `date`.
+ * Exposed for the previous-days "unconfirmed" flow. Never generates for
+ * future dates.
+ */
+export async function generateSubscriptionDeliveries(
+  tenantId: string,
+  date: string,
+  slot?: DeliverySlot,
+  dbOrTx: DBOrTx = db,
+) {
+  if (date > todayStr()) return { date, created: 0 };
+  const supply = await getTodaySupply(tenantId, { date, slot }, dbOrTx);
+  const created = await ensureSubscriptionDeliveryRows(tenantId, date, supply.items, slot, dbOrTx);
+  return { date, created };
+}
+
+/**
+ * Keep served deliveries visible on the board even after their subscription's
+ * `nextDeliveryDate` has advanced (which removes them from the "due" query).
+ */
+async function includeLedgerSubscriptions(
+  tenantId: string,
+  dueSubs: SubWithSlots[],
+  ledger: DeliveryLedgerRow[],
+  legacy: SubscriptionDelivery[],
+  dbOrTx: DBOrTx,
+): Promise<SubWithSlots[]> {
+  const dueIds = new Set(dueSubs.map((s) => s.id));
+  const missing = new Set<string>();
+  for (const row of ledger) {
+    if (row.referenceId && !dueIds.has(row.referenceId)) missing.add(row.referenceId);
+  }
+  for (const row of legacy) {
+    if (!dueIds.has(row.subscriptionId)) missing.add(row.subscriptionId);
+  }
+  if (missing.size === 0) return dueSubs;
+
+  const ids = [...missing];
+  const [rows, slotRows] = await Promise.all([
+    listSubscriptionsByIds(tenantId, ids, dbOrTx),
+    listSubscriptionSlotsForSubs(tenantId, ids, dbOrTx),
+  ]);
+  const slotsBySub = new Map<string, Array<{ slot: DeliverySlot; quantityPerDelivery: number }>>();
+  for (const row of slotRows) {
+    const list = slotsBySub.get(row.subscriptionId) ?? [];
+    list.push({
+      slot: row.deliverySlot as DeliverySlot,
+      quantityPerDelivery: num(row.quantityPerDelivery),
+    });
+    slotsBySub.set(row.subscriptionId, list);
+  }
+
+  return [
+    ...dueSubs,
+    ...rows.map((row) => ({
+      ...row,
+      slots: slotsBySub.get(row.id) ?? [
+        {
+          slot: row.deliverySlot as DeliverySlot,
+          quantityPerDelivery: num(row.quantityPerDelivery),
+        },
+      ],
+    })),
+  ];
+}
 
 interface BoardUser {
   id: string;
@@ -1627,9 +1797,12 @@ interface BoardProduct {
 interface BoardOrderItems {
   orderId: string;
   productId: string | null;
+  variantId?: string | null;
   productName: string;
+  variantLabel?: string | null;
   unit: string | null;
   quantity: string;
+  unitPrice: string;
 }
 
 function pickAddress(userId: string, byUser: Map<string, UserAddress[]>): UserAddress | undefined {
@@ -1668,6 +1841,8 @@ async function buildBoardEntries(
   slot: DeliverySlot | undefined,
   subs: SubWithSlots[],
   orders: Order[],
+  ledger: DeliveryLedgerRow[],
+  legacy: SubscriptionDelivery[],
   dbOrTx: DBOrTx,
 ): Promise<BoardEntry[]> {
   const userIds = [...new Set([...subs.map((s) => s.userId), ...orders.map((o) => o.userId)])];
@@ -1710,13 +1885,16 @@ async function buildBoardEntries(
     addressesByUser.set(a.userId, arr);
   }
 
-  const deliveries =
-    subs.length ? await findDeliveriesForDate(tenantId, subs.map((s) => s.id), date, dbOrTx) : [];
   const deliveryBySub = new Map<string, SubscriptionDelivery[]>();
-  for (const d of deliveries) {
+  for (const d of legacy) {
     const arr = deliveryBySub.get(d.subscriptionId) ?? [];
     arr.push(d);
     deliveryBySub.set(d.subscriptionId, arr);
+  }
+  const ledgerByKey = new Map<string, DeliveryLedgerRow>();
+  for (const row of ledger) {
+    const key = ledgerKey(row.referenceId, row.deliverySlot);
+    if (key) ledgerByKey.set(key, row);
   }
 
   const entries: BoardEntry[] = [];
@@ -1733,9 +1911,20 @@ async function buildBoardEntries(
         : [{ slot: s.deliverySlot as DeliverySlot, quantityPerDelivery: num(s.quantityPerDelivery) }];
     const slots = slot ? configuredSlots.filter((configured) => configured.slot === slot) : configuredSlots;
     for (const configured of slots) {
-      const existing = dlist.find((d) => d.deliverySlot === configured.slot);
+      const legacyEntry = dlist.find((d) => d.deliverySlot === configured.slot);
+      const ledgerEntry = ledgerByKey.get(`${s.id}|${configured.slot}`);
+      const existing =
+        legacyEntry && legacyEntry.status !== 'pending'
+          ? legacyEntry
+          : ledgerEntry && ledgerEntry.status !== 'pending'
+            ? ledgerEntry
+            : (legacyEntry ?? ledgerEntry ?? null);
+      const deliveryStatus = existing?.status ?? 'pending';
       const scheduledQty = num(configured.quantityPerDelivery);
-      const actualQty = existing?.actualQuantity != null ? num(existing.actualQuantity) : null;
+      const actualQty =
+        deliveryStatus !== 'pending' && existing?.actualQuantity != null
+          ? num(existing.actualQuantity)
+          : null;
       entries.push({
         id: `${s.id}-${configured.slot}`,
         userId: s.userId,
@@ -1751,20 +1940,35 @@ async function buildBoardEntries(
         subscriptionId: s.id,
         deliverySlot: configured.slot,
         orderId: null,
+        deliveryId: ledgerEntry?.id ?? null,
         productId: s.productId,
         productName: prod ? (s.variantLabel ? `${prod.name} (${s.variantLabel})` : prod.name) : s.variantLabel ?? '—',
         unit: s.variantUnit ?? prod?.unit ?? null,
-        deliveryStatus: existing ? existing.status : 'pending',
+        pricePerPacket: s.pricePerPacket != null ? num(s.pricePerPacket) : null,
+        deliveryStatus,
         quantity: scheduledQty,
         scheduledQuantity: scheduledQty,
         actualQuantity: actualQty,
         volumeInLiters: volumeInLiters(scheduledQty, s.variantQuantity, s.variantUnit, prod?.unit ?? null),
         outcome:
-          existing && actualQty != null
-            ? { actualQuantity: actualQty, notes: existing.notes ?? null }
+          actualQty != null
+            ? { actualQuantity: actualQty, notes: existing?.notes ?? null }
             : null,
-        canRecordOutcome: !existing,
+        canRecordOutcome: deliveryStatus === 'pending',
         sequence: u?.deliverySequence ?? null,
+        items: [
+          {
+            productId: s.productId,
+            variantId: s.variantId ?? null,
+            productName: prod ? (s.variantLabel ? `${prod.name} (${s.variantLabel})` : prod.name) : s.variantLabel ?? '—',
+            variantLabel: s.variantLabel ?? null,
+            unit: s.variantUnit ?? prod?.unit ?? null,
+            quantity: scheduledQty,
+            deliveredQuantity: actualQty ?? (deliveryStatus === 'delivered' ? scheduledQty : 0),
+            unitPrice: num(s.pricePerPacket),
+            itemStatus: deliveryStatus,
+          },
+        ],
       });
     }
   }
@@ -1804,6 +2008,7 @@ async function buildBoardEntries(
       subscriptionId: null,
       deliverySlot: null,
       orderId: o.id,
+      deliveryId: null,
       productId: items.length ? items[0].productId ?? null : null,
       productName: productName || '—',
       unit,
@@ -1815,6 +2020,17 @@ async function buildBoardEntries(
       outcome: null,
       canRecordOutcome,
       sequence: u?.deliverySequence ?? null,
+      items: items.map((it) => ({
+        productId: it.productId ?? '',
+        variantId: it.variantId ?? null,
+        productName: it.productName,
+        variantLabel: it.variantLabel ?? null,
+        unit: it.unit ?? null,
+        quantity: num(it.quantity),
+        deliveredQuantity: o.orderStatus === 'delivered' ? num(it.quantity) : 0,
+        unitPrice: num(it.unitPrice),
+        itemStatus: deliveryStatus,
+      })),
     });
   }
 
@@ -1854,6 +2070,7 @@ function minimalBoardEntries(subs: SubWithSlots[], orders: Order[]): BoardEntry[
         scheduledQuantity: scheduledQty,
         actualQuantity: null,
         volumeInLiters: null,
+        deliveryId: null,
         outcome: null,
         canRecordOutcome: true,
         sequence: null,
@@ -1876,6 +2093,7 @@ function minimalBoardEntries(subs: SubWithSlots[], orders: Order[]): BoardEntry[
       subscriptionId: null,
       deliverySlot: null,
       orderId: o.id,
+      deliveryId: null,
       productId: null,
       productName: 'Order',
       unit: null,
@@ -1902,11 +2120,29 @@ export async function getDeliveryBoard(
   // Pending one-time orders are merged by the controller via the orders module.
   const date = opts.date ?? todayStr();
   const supply = await getTodaySupply(tenantId, opts, dbOrTx);
-  const subs = supply.items;
+
+  // Materialize today's/past scheduled deliveries so the board is a stable
+  // ledger (and previous-days shortages are visible), then include already
+  // served deliveries that dropped out of the "due" window.
+  const [ledger, legacy] = await Promise.all([
+    findDeliveryLedgerForDate(tenantId, date, 'subscription', dbOrTx),
+    findSubscriptionDeliveriesForDate(tenantId, date, dbOrTx),
+  ]);
+  await ensureSubscriptionDeliveryRows(tenantId, date, supply.items, opts.slot, dbOrTx, ledger, legacy);
+  const subs = await includeLedgerSubscriptions(tenantId, supply.items, ledger, legacy, dbOrTx);
 
   let entries: BoardEntry[];
   try {
-    entries = await buildBoardEntries(tenantId, date, opts.slot, subs, orders, dbOrTx);
+    entries = await buildBoardEntries(
+      tenantId,
+      date,
+      opts.slot,
+      subs,
+      orders,
+      ledger,
+      legacy,
+      dbOrTx,
+    );
   } catch (err) {
     logger.error({ err, tenantId }, 'delivery-board: enrichment failed, returning minimal entries');
     entries = minimalBoardEntries(subs, orders);

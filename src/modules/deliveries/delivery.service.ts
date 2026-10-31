@@ -2,7 +2,7 @@ import { db } from '../../shared/db/client.js';
 import { withTransaction } from '../../shared/db/transaction.js';
 import { AppError } from '../../shared/middleware/errorHandler.js';
 import type { DBOrTx, DrizzleTx } from '../../shared/types/index.js';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { round2, toDateOnlyString, addDays } from '../../shared/utils/dateUtils.js';
 import { istToday } from '../../shared/utils/dateUtils.js';
 import {
@@ -307,7 +307,11 @@ export async function recordDeliveryOutcome(
     } else if (input.type === 'subscription' && sub) {
       const variantId = sub.variantId ?? undefined;
       const resolved = await resolveUnitPrice(tenantId, input.customerId, sub.productId, variantId, t);
-      if (resolvedPrice === 0) resolvedPrice = resolved.price;
+      // Prioritize customPrice/pricePerPacket locked at subscription creation over current catalog price
+      const subPrice = sub.pricePerPacket != null && Number(sub.pricePerPacket) > 0
+        ? Number(sub.pricePerPacket)
+        : resolved.price;
+      if (resolvedPrice === 0) resolvedPrice = subPrice;
       const qty = num(input.scheduledQuantity ?? scheduledQty);
       rows.push({
         productId: sub.productId,
@@ -316,14 +320,18 @@ export async function recordDeliveryOutcome(
         variantLabel: resolved.variantLabel ?? null,
         unit: resolved.unit ?? null,
         quantity: qty,
-        unitPrice: resolvedPrice,
-        amount: round2(resolvedPrice * qty),
+        unitPrice: subPrice,
+        amount: round2(subPrice * qty),
       });
     } else if (input.type === 'order' && orderId) {
       const items = await findOrderItems(orderId, t);
       for (const it of items) {
         const resolved = await resolveUnitPrice(tenantId, input.customerId, it.productId ?? '', it.variantId ?? null, t);
         const qty = num(it.quantity);
+        // Prioritize unitPrice agreed at order creation over current catalog price
+        const itemPrice = it.unitPrice != null && Number(it.unitPrice) > 0
+          ? Number(it.unitPrice)
+          : resolved.price;
         rows.push({
           productId: it.productId ?? '',
           variantId: it.variantId ?? null,
@@ -331,16 +339,20 @@ export async function recordDeliveryOutcome(
           variantLabel: it.variantLabel ?? null,
           unit: it.unit ?? resolved.unit ?? null,
           quantity: qty,
-          unitPrice: num(it.unitPrice),
-          amount: round2(num(it.unitPrice) * qty),
+          unitPrice: itemPrice,
+          amount: round2(itemPrice * qty),
         });
-        if (resolvedPrice === 0) resolvedPrice = num(it.unitPrice);
+        if (resolvedPrice === 0) resolvedPrice = itemPrice;
       }
     }
 
     if (input.pricePerPacket == null) input.pricePerPacket = resolvedPrice;
     const finalQty = chargeableQty(input.status, num(input.scheduledQuantity ?? scheduledQty), input.actualQuantity);
-    const finalAmount = round2(finalQty * resolvedPrice);
+    // For multi-item deliveries (or single item), sum the amounts accurately
+    const calculatedRowsTotal = rows.reduce((acc, r) => acc + r.amount, 0);
+    const finalAmount = rows.length > 1
+      ? round2(calculatedRowsTotal)
+      : round2(finalQty * resolvedPrice);
     if (input.scheduledQuantity == null) input.scheduledQuantity = finalQty || scheduledQty;
 
     // ---- re-record: reverse old ledger + stock ----
@@ -821,4 +833,66 @@ function scheduledQtyFor(
     throw new AppError('Multiple slots configured — specify `slot` (morning or evening)', 422);
   }
   return 0;
+}
+
+export async function confirmUnconfirmedDeliveries(
+  tenantId: string,
+  input: { days?: number; slot?: 'morning' | 'evening' },
+  actorId: string,
+  tx?: DrizzleTx,
+) {
+  const run = async (t: DrizzleTx) => {
+    const from = toDateOnlyString(istToday());
+    const to = toDateOnlyString(addDays(from, (input.days ?? 7) - 1));
+    const conditions = [
+      eq(deliveries.tenantId, tenantId),
+      eq(deliveries.type, 'subscription'),
+      eq(deliveries.status, 'pending'),
+      sql`${deliveries.deliveryDate} >= ${from}`,
+      sql`${deliveries.deliveryDate} <= ${to}`,
+    ];
+    if (input.slot) conditions.push(eq(deliveries.deliverySlot, input.slot));
+    const where = and(...conditions);
+    const list = await t.select().from(deliveries).where(where);
+    const ids = list.map((r) => r.id);
+    if (ids.length === 0) return { confirmed: 0, deliveries: [] };
+    const updated = await Promise.all(
+      ids.map((id) =>
+        updateDeliveryOptimistic(tenantId, id, {
+          status: 'extra',
+          reason: `Bulk confirmed on ${from} via ${actorId}`,
+          notes: `Automatically confirmed a set of pending subscriptions`,
+          handledById: actorId,
+          updatedAt: new Date(),
+        }, num(list.find((r) => r.id === id)?.version ?? 0), t),
+      ),
+    );
+    const confirmed = updated.filter(Boolean).length;
+    const confirmedIds = ids.filter((_, i) => updated[i]);
+    const deliveryItems = await findDeliveryWithItems(tenantId, confirmedIds[0] ?? ids[0], t);
+    return { confirmed, deliveries: [deliveryItems] };
+  };
+  return tx ? await run(tx) : await withTransaction(run);
+}
+
+export async function listUnconfirmedDeliveries(
+  tenantId: string,
+  input: { days?: number; slot?: 'morning' | 'evening' },
+  dbOrTx: DBOrTx = db,
+) {
+  const conditions = [
+    eq(deliveries.tenantId, tenantId),
+    eq(deliveries.type, 'subscription'),
+    eq(deliveries.status, 'pending'),
+    sql`${deliveries.deliveryDate} <= ${toDateOnlyString(istToday())}`,
+  ];
+  if (input.slot) conditions.push(eq(deliveries.deliverySlot, input.slot));
+  const where = and(...conditions);
+  const results = await dbOrTx.select().from(deliveries).where(where);
+  return results;
+}
+
+export function isEveningOpen(date: string): boolean {
+  const dayOfWeek = new Date(date).getDay();
+  return dayOfWeek === 0 || dayOfWeek === 6;
 }

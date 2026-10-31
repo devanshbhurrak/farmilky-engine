@@ -11,6 +11,9 @@ import {
   recordPaymentAgainstDelivery,
   markMissedDeliveries,
   getCustomerDeliverySummary,
+  listUnconfirmedDeliveries,
+  confirmUnconfirmedDeliveries,
+  isEveningOpen,
 } from './delivery.service.js';
 import { listDeliveries, findDeliveryWithItems } from './delivery.repository.js';
 import type {
@@ -19,7 +22,10 @@ import type {
   CancelDeliveryInput,
   DeliveryQuery,
   DeliveryIdParam,
+  SessionStateQuery,
 } from './delivery.schema.js';
+import { toDateOnlyString } from '../../shared/utils/dateUtils.js';
+import { istToday } from '../../shared/utils/dateUtils.js';
 import type { CustomerDeliverySummaryInput } from './delivery.schema.js';
 
 const isAdmin = (user: AuthUser) => user.role === 'admin';
@@ -191,4 +197,39 @@ export const markMissedDeliveriesController = async (c: Context) => {
   const cutoff = body.beforeDate ?? new Date().toISOString().slice(0, 10);
   const marked = await markMissedDeliveries(user.tenantId, cutoff);
   return ok(c, { marked: marked.length, items: marked });
+};
+
+export const unconfirmedDeliveriesController = async (c: Context) => {
+  const user = c.get('user') as AuthUser;
+  const query = (c.get('query') ?? {}) as { days?: number; slot?: 'morning' | 'evening' };
+  const result = await listUnconfirmedDeliveries(user.tenantId, {
+    days: query.days,
+    slot: query.slot,
+  });
+  return ok(c, result);
+};
+
+export const confirmUnconfirmedDeliveriesController = async (c: Context) => {
+  const user = c.get('user') as AuthUser;
+  const body = (c.get('body') ?? {}) as { days?: number; slot?: 'morning' | 'evening' };
+  const result = await confirmUnconfirmedDeliveries(
+    user.tenantId,
+    { days: body.days, slot: body.slot },
+    user.id,
+  );
+  return ok(c, result);
+};
+
+export const getSessionStateController = async (c: Context) => {
+  const user = c.get('user') as AuthUser;
+  const query = (c.get('query') ?? {}) as SessionStateQuery;
+  const date = query.date ?? toDateOnlyString(istToday());
+  const isToday = date === toDateOnlyString(istToday());
+  return ok(c, {
+    date,
+    isToday,
+    morningOpen: true,
+    eveningOpen: isEveningOpen(date),
+    eveningOpensAt: '17:00 IST',
+  });
 };

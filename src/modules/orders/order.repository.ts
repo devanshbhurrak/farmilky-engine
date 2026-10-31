@@ -123,8 +123,11 @@ export async function findOrderItemsForBoard(
     .select({
       orderId: orderItems.orderId,
       quantity: orderItems.quantity,
+      unitPrice: orderItems.unitPrice,
       productId: orderItems.productId,
+      variantId: orderItems.variantId,
       productName: orderItems.productName,
+      variantLabel: orderItems.variantLabel,
       unit: orderItems.unit,
     })
     .from(orderItems)

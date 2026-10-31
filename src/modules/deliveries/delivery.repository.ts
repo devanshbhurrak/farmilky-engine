@@ -52,6 +52,20 @@ export async function insertDelivery(data: NewDelivery, dbOrTx: DBOrTx = db) {
   return rows[0]!;
 }
 
+/**
+ * Insert a delivery unless a row with the same `idempotencyKey` already
+ * exists. Used when materializing scheduled (pending) deliveries so repeated
+ * board loads never duplicate rows.
+ */
+export async function insertDeliveryIfAbsent(data: NewDelivery, dbOrTx: DBOrTx = db) {
+  const rows = await tx(dbOrTx)
+    .insert(deliveries)
+    .values(data)
+    .onConflictDoNothing({ target: deliveries.idempotencyKey })
+    .returning({ id: deliveries.id });
+  return rows[0] ?? null;
+}
+
 export async function insertDeliveryItems(
   deliveryId: string,
   items: Omit<NewDeliveryItem, 'deliveryId'>[],
@@ -62,6 +76,13 @@ export async function insertDeliveryItems(
     .insert(deliveryItems)
     .values(items.map((i) => ({ ...i, deliveryId })))
     .returning();
+}
+
+export async function deleteDeliveryItems(
+  deliveryId: string,
+  dbOrTx: DBOrTx = db,
+) {
+  return tx(dbOrTx).delete(deliveryItems).where(eq(deliveryItems.deliveryId, deliveryId));
 }
 
 export async function findDeliveryById(tenantId: string, id: string, dbOrTx: DBOrTx = db) {
@@ -110,6 +131,40 @@ export async function findDeliveryByReference(
     .where(and(...conditions))
     .limit(1);
   return rows[0] ?? null;
+}
+
+/**
+ * Canonical delivery-ledger rows for a single date. Used to enrich the
+ * subscription delivery board and to avoid re-materializing scheduled rows.
+ */
+export async function findDeliveryLedgerForDate(
+  tenantId: string,
+  date: string,
+  type: DeliveryType = 'subscription',
+  dbOrTx: DBOrTx = db,
+) {
+  return tx(dbOrTx)
+    .select({
+      id: deliveries.id,
+      customerId: deliveries.customerId,
+      referenceId: deliveries.referenceId,
+      deliveryDate: deliveries.deliveryDate,
+      deliverySlot: deliveries.deliverySlot,
+      status: deliveries.status,
+      scheduledQuantity: deliveries.scheduledQuantity,
+      actualQuantity: deliveries.actualQuantity,
+      notes: deliveries.notes,
+    })
+    .from(deliveries)
+    .where(
+      and(
+        eq(deliveries.tenantId, tenantId),
+        eq(deliveries.type, type),
+        eq(deliveries.deliveryDate, date),
+        ACTIVE,
+      ),
+    )
+    .orderBy(asc(deliveries.deliverySlot));
 }
 
 export async function findDeliveryWithItems(
@@ -264,6 +319,61 @@ export async function listDeliveries(
     .leftJoin(users, eq(users.id, deliveries.customerId))
     .where(and(...conditions));
   return { items: rows, total: Number(total) };
+}
+
+/**
+ * Pending subscription deliveries in an inclusive date range, enriched with
+ * customer contact details. Rows already recorded in the legacy
+ * `subscription_deliveries` table are excluded so agent-recorded outcomes are
+ * never double-confirmed.
+ */
+export async function listPendingSubscriptionDeliveries(
+  tenantId: string,
+  fromDate: string,
+  toDate: string,
+  slot?: (typeof deliverySlotEnum.enumValues)[number] | null,
+  dbOrTx: DBOrTx = db,
+) {
+  const conditions = [
+    eq(deliveries.tenantId, tenantId),
+    ACTIVE,
+    eq(deliveries.type, 'subscription'),
+    eq(deliveries.status, 'pending'),
+    gte(deliveries.deliveryDate, fromDate),
+    lte(deliveries.deliveryDate, toDate),
+    sql`NOT EXISTS (
+      SELECT 1 FROM subscription_deliveries sd
+      WHERE sd.tenant_id = ${deliveries.tenantId}
+        AND sd.subscription_id = ${deliveries.referenceId}
+        AND sd.delivery_date = ${deliveries.deliveryDate}
+        AND sd.delivery_slot = ${deliveries.deliverySlot}
+    )`,
+  ];
+  if (slot) conditions.push(eq(deliveries.deliverySlot, slot));
+
+  return tx(dbOrTx)
+    .select({
+      id: deliveries.id,
+      customerId: deliveries.customerId,
+      customerName: users.name,
+      customerPhone: users.phone,
+      deliveryDate: deliveries.deliveryDate,
+      deliverySlot: deliveries.deliverySlot,
+      status: deliveries.status,
+      scheduledQuantity: deliveries.scheduledQuantity,
+      pricePerPacket: deliveries.pricePerPacket,
+      referenceType: deliveries.referenceType,
+      referenceId: deliveries.referenceId,
+    })
+    .from(deliveries)
+    .leftJoin(users, eq(users.id, deliveries.customerId))
+    .where(and(...conditions))
+    .orderBy(
+      asc(deliveries.deliveryDate),
+      asc(deliveries.deliverySlot),
+      asc(users.deliverySequence),
+      asc(users.name),
+    );
 }
 
 export async function countDeliveriesForPeriod(

@@ -157,6 +157,7 @@ export function netPayable(parts: {
 function buildProductSummary(
   items: TransactionItem[],
   totalPayments: number,
+  settlementsMap?: Map<string, number>,
 ): invoiceRepo.InvoiceSummaryInput[] {
   const grouped = new Map<
     string,
@@ -167,6 +168,7 @@ function buildProductSummary(
       unit: string | null;
       totalQuantity: number;
       totalAmount: number;
+      settledAmount: number;
     }
   >();
 
@@ -181,9 +183,14 @@ function buildProductSummary(
       unit: it.unit ?? null,
       totalQuantity: 0,
       totalAmount: 0,
+      settledAmount: 0,
     };
     acc.totalQuantity += Number(it.quantity ?? 0);
-    acc.totalAmount += Number(it.amount ?? 0);
+    const lineAmt = Number(it.amount ?? 0);
+    acc.totalAmount += lineAmt;
+    if (settlementsMap && it.transactionId) {
+      acc.settledAmount += settlementsMap.get(it.transactionId) ?? 0;
+    }
     if (!acc.unit && it.unit) acc.unit = it.unit;
     if (!acc.productId && it.productId) acc.productId = it.productId;
     grouped.set(key, acc);
@@ -193,9 +200,16 @@ function buildProductSummary(
 
   return [...grouped.values()].map((p) => {
     const avgRate = p.totalQuantity > 0 ? p.totalAmount / p.totalQuantity : 0;
-    const share = deliveryTotal > 0 ? p.totalAmount / deliveryTotal : 0;
-    const paidAmount = Math.min(p.totalAmount, share * Math.max(0, totalPayments));
-    const outstandingAmount = Math.max(0, p.totalAmount - paidAmount);
+    // Use actual settled amounts from transaction_settlements when available;
+    // fallback to pro-rata share if settlements are unrecorded
+    let paidAmount: number;
+    if (settlementsMap && settlementsMap.size > 0) {
+      paidAmount = Math.min(p.totalAmount, p.settledAmount);
+    } else {
+      const share = deliveryTotal > 0 ? p.totalAmount / deliveryTotal : 0;
+      paidAmount = Math.min(p.totalAmount, share * Math.max(0, totalPayments));
+    }
+    const outstandingAmount = Math.max(0, round2(p.totalAmount - paidAmount));
     return {
       productId: p.productId,
       productName: p.productName,
@@ -320,7 +334,9 @@ export async function generateInvoice(
       })
       .sort((a, b) => String(a.entryDate ?? '').localeCompare(String(b.entryDate ?? '')));
 
-    const summary = buildProductSummary(deliveryItems, totalPayments);
+    const { findSettlementSummaryForDebits } = await import('../../modules/transactions/settlement.repository.js');
+    const settlementsMap = await findSettlementSummaryForDebits(tenantId, chargeIds, tx);
+    const summary = buildProductSummary(deliveryItems, totalPayments, settlementsMap);
 
     // Only auto-mark paid when money actually covers the bill (or an
     // overpayment exists). A ₹0 invoice with no payments stays draft.

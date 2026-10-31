@@ -49,7 +49,20 @@ export async function getAdminStats(tenantId: string): Promise<StatsRow> {
         WHERE tenant_id = ${tenantId} AND role = 'customer' AND deleted_at IS NULL
           AND account_balance > 0) AS pending_amount
   `)) as unknown as StatsRow[];
-  const r = rows[0]!;
+  const r = rows[0];
+  if (!r) {
+    return {
+      total_customers: 0,
+      total_orders: 0,
+      total_revenue: 0,
+      active_subscriptions: 0,
+      today_deliveries: 0,
+      today_delivered: 0,
+      monthly_revenue: 0,
+      pending_payments: 0,
+      pending_amount: 0,
+    };
+  }
   return {
     total_customers: Number(r.total_customers ?? 0),
     total_orders: Number(r.total_orders ?? 0),

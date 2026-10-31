@@ -153,6 +153,9 @@ export class TransactionService {
         },
         t,
       );
+      // Auditable settlement reversal
+      const { settlementService } = await import('./settlement.service.js');
+      await settlementService.reverseSettlementsForTxn(tenantId, txnId, reversal.id, reason, t);
       return reversal;
     };
     if (tx) return run(tx);
@@ -252,6 +255,9 @@ export class TransactionService {
         },
         t,
       );
+      // Auditable settlement reversal
+      const { settlementService } = await import('./settlement.service.js');
+      await settlementService.reverseSettlementsForTxn(tenantId, txnId, reversal.id, reason, t);
       return reversal;
     };
     if (tx) return run(tx);

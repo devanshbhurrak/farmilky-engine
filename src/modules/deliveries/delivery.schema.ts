@@ -21,12 +21,20 @@ const chargeableStatuses = new Set(['delivered', 'partial', 'extra']);
 
 export const deliveryItemInputSchema = z.object({
   productId: uuid,
-  variantId: uuid.optional(),
+  // Accept empty string and treat as undefined (optional field)
+  variantId: z.union([uuid, z.literal('')]).optional().transform((v) => (v === '' ? undefined : v)),
   productName: z.string().min(1).max(255),
   variantLabel: z.string().max(120).optional(),
   unit: z.string().max(60).optional(),
   quantity: z.coerce.number().int().positive('Quantity must be a positive whole number'),
   unitPrice: z.coerce.number().nonnegative('Unit price cannot be negative'),
+  // Actual delivered quantity for this item (defaults to scheduled quantity
+  // when the item is fully delivered).
+  deliveredQuantity: z.coerce.number().nonnegative().optional(),
+  // Per-item outcome: pending / delivered / partial / failed / skipped.
+  status: deliveryStatusSchema.optional(),
+  failureReason: z.string().max(500).optional(),
+  failureNotes: z.string().max(1000).optional(),
 });
 
 export type DeliveryItemInput = z.infer<typeof deliveryItemInputSchema>;
@@ -44,7 +52,8 @@ export const recordDeliveryOutcomeSchema = z
     type: deliveryTypeSchema,
     // What this delivery fulfils (optional for ad-hoc instant deliveries).
     referenceType: z.enum(['subscription', 'order']).optional(),
-    referenceId: uuid.optional(),
+    // Accept empty string and treat as undefined (optional field)
+    referenceId: z.union([uuid, z.literal('')]).optional().transform((v) => (v === '' ? undefined : v)),
     deliveryDate: dateString,
     deliverySlot: deliverySlotSchema.optional(),
     status: deliveryStatusSchema,
@@ -59,6 +68,15 @@ export const recordDeliveryOutcomeSchema = z
     idempotencyKey: z.string().min(1).max(128).optional(),
     // Expected current version for optimistic locking on corrections.
     expectedVersion: z.coerce.number().int().nonnegative().optional(),
+    // Delivery-time payment (optional)
+    paymentReceived: z
+      .object({
+        amount: z.coerce.number().positive('Payment amount must be positive'),
+        paymentMethod: z.string().min(1).default('cash'),
+        paymentRef: z.string().max(255).optional().nullable(),
+      })
+      .optional()
+      .nullable(),
   })
   .superRefine((v, ctx) => {
     if ((v.status === 'partial' || v.status === 'extra') && v.actualQuantity == null) {
@@ -157,6 +175,15 @@ export const deliveryQuerySchema = z.object({
 
 export type DeliveryQuery = z.infer<typeof deliveryQuerySchema>;
 
+export const unconfirmedDeliveriesQuerySchema = z.object({
+  days: z.coerce.number().int().min(1).max(30).default(7),
+  slot: deliverySlotSchema.optional(),
+});
+export type UnconfirmedDeliveriesQuery = z.infer<typeof unconfirmedDeliveriesQuerySchema>;
+
+export const confirmUnconfirmedDeliveriesSchema = unconfirmedDeliveriesQuerySchema;
+export type ConfirmUnconfirmedDeliveriesInput = z.infer<typeof confirmUnconfirmedDeliveriesSchema>;
+
 export const customerDeliverySummarySchema = z.object({
   customerId: uuid,
   fromDate: dateString.optional(),
@@ -164,3 +191,8 @@ export const customerDeliverySummarySchema = z.object({
 });
 
 export type CustomerDeliverySummaryInput = z.infer<typeof customerDeliverySummarySchema>;
+
+export const sessionStateQuerySchema = z.object({
+  date: dateString.optional(),
+});
+export type SessionStateQuery = z.infer<typeof sessionStateQuerySchema>;

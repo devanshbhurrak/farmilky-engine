@@ -4,6 +4,8 @@ import { AppError } from '../../shared/middleware/errorHandler.js';
 import type { DBOrTx, DrizzleTx } from '../../shared/types/index.js';
 import { toDateOnlyString } from '../../shared/utils/dateUtils.js';
 import { deleteImageByUrl, isR2Url } from '../../shared/storage/r2.js';
+import { productVariants } from '../../shared/db/schema/index.js';
+import { and, eq } from 'drizzle-orm';
 import type { CreateProductInput, UpdateProductInput, UpdateVariantInput } from './product.schema.js';
 import {
   countProducts,
@@ -163,49 +165,71 @@ export async function updateProduct(
     let variantRows = await findVariantsByProductId(tenantId, productId, t);
     if (variants !== undefined) {
       const normalized = normalizeDefaults(variants);
+      // Clear every existing default first so that creating or promoting a new
+      // default variant in this transaction never violates the
+      // product_variants_one_default unique index (e.g. when an existing default
+      // variant was removed from the input and won't be re-saved here).
+      await t
+        .update(productVariants)
+        .set({ isDefault: false, updatedAt: new Date() })
+        .where(and(eq(productVariants.tenantId, tenantId), eq(productVariants.productId, productId)));
       const keepIds: string[] = [];
+      // First pass: update existing variants (unset defaults before creating new ones).
       for (const v of normalized) {
-        if (v.id) {
-          const patch = stripUndefined({
-            label: v.label,
-            quantity: v.quantity,
-            unit: v.unit,
-            price: v.price,
-            discountedPrice: v.discountedPrice,
-            stock: v.stock,
-            isDefault: v.isDefault,
-            isAvailable: v.isAvailable,
-            sortOrder: v.sortOrder,
-          } satisfies Record<string, unknown>) as Partial<UpdateVariantInput>;
-          const row = await updateVariantRow(tenantId, productId, v.id, patch, t);
-          if (!row) throw new AppError('Product variant not found', 404);
-          keepIds.push(v.id);
-        } else {
-          if (v.label === undefined || v.quantity === undefined || v.unit === undefined || v.price === undefined) {
-            throw new AppError('New variants require label, quantity, unit and price', 422);
-          }
-          const created = await createVariantRows(
-            tenantId,
-            productId,
-            [
-              {
-                label: v.label,
-                quantity: v.quantity,
-                unit: v.unit,
-                price: v.price,
-                discountedPrice: v.discountedPrice,
-                stock: v.stock ?? 0,
-                isDefault: v.isDefault ?? false,
-                isAvailable: v.isAvailable ?? true,
-                sortOrder: v.sortOrder ?? 0,
-              },
-            ],
-            t,
-          );
-          if (created[0]) keepIds.push(created[0].id);
-        }
+        if (!v.id) continue;
+        const patch = stripUndefined({
+          label: v.label,
+          quantity: v.quantity,
+          unit: v.unit,
+          price: v.price,
+          discountedPrice: v.discountedPrice,
+          stock: v.stock,
+          isDefault: v.isDefault,
+          isAvailable: v.isAvailable,
+          sortOrder: v.sortOrder,
+        } satisfies Record<string, unknown>) as Partial<UpdateVariantInput>;
+        const row = await updateVariantRow(tenantId, productId, v.id, patch, t);
+        if (!row) throw new AppError('Product variant not found', 404);
+        keepIds.push(v.id);
       }
-      await deleteVariantsExcluding(tenantId, productId, keepIds, t);
+      for (const v of normalized) {
+        if (v.id) continue;
+        if (v.label === undefined || v.quantity === undefined || v.unit === undefined || v.price === undefined) {
+          throw new AppError('New variants require label, quantity, unit and price', 422);
+        }
+        const created = await createVariantRows(
+          tenantId,
+          productId,
+          [
+            {
+              label: v.label,
+              quantity: v.quantity,
+              unit: v.unit,
+              price: v.price,
+              discountedPrice: v.discountedPrice,
+              stock: v.stock ?? 0,
+              isDefault: v.isDefault ?? false,
+              isAvailable: v.isAvailable ?? true,
+              sortOrder: v.sortOrder ?? 0,
+            },
+          ],
+          t,
+        );
+        if (created[0]) keepIds.push(created[0].id);
+      }
+            try {
+        await deleteVariantsExcluding(tenantId, productId, keepIds, t);
+      } catch (err: unknown) {
+        const error = err as { code?: string; message?: string };
+        if (error.code === '23503') {
+          throw new AppError(
+            'Cannot delete variant that is linked to existing subscriptions, orders, or deliveries. You can mark it as unavailable instead.',
+            409,
+            'VARIANT_IN_USE',
+          );
+        }
+        throw err;
+      }
       variantRows = await findVariantsByProductId(tenantId, productId, t);
     }
     // Safety net: if the product ends up with no variants (e.g. an admin

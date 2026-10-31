@@ -281,6 +281,36 @@ export async function updateSubscriptionRow(
 
 // ---------- deliveries ----------
 
+export async function listSubscriptionsByIds(
+  tenantId: string,
+  ids: string[],
+  dbOrTx: DBOrTx = db,
+) {
+  if (ids.length === 0) return [];
+  return (dbOrTx as typeof db)
+    .select()
+    .from(subscriptions)
+    .where(
+      and(eq(subscriptions.tenantId, tenantId), inArray(subscriptions.id, [...new Set(ids)])),
+    );
+}
+
+export async function findSubscriptionDeliveriesForDate(
+  tenantId: string,
+  date: string,
+  dbOrTx: DBOrTx = db,
+) {
+  return (dbOrTx as typeof db)
+    .select()
+    .from(subscriptionDeliveries)
+    .where(
+      and(
+        eq(subscriptionDeliveries.tenantId, tenantId),
+        eq(subscriptionDeliveries.deliveryDate, date),
+      ),
+    );
+}
+
 export async function findDeliveryBySubscriptionAndDate(
   tenantId: string,
   subscriptionId: string,
@@ -590,6 +620,9 @@ export async function findOrderItemsForBoard(
       productId: orderItems.productId,
       productName: orderItems.productName,
       unit: orderItems.unit,
+      unitPrice: orderItems.unitPrice,
+      variantId: orderItems.variantId,
+      variantLabel: orderItems.variantLabel,
     })
     .from(orderItems)
     .where(inArray(orderItems.orderId, [...new Set(orderIds)]));

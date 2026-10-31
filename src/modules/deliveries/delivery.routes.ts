@@ -8,6 +8,7 @@ import { validateBody, validateParams, validateQuery } from '../../shared/middle
 import type { HonoEnv } from '../../shared/types/index.js';
 import {
   cancelDeliveryController,
+  confirmUnconfirmedDeliveriesController,
   correctDeliveryController,
   customerDeliverySummaryController,
   getDeliveryController,
@@ -16,9 +17,12 @@ import {
   recordDeliveryOutcomeController,
   recordPaymentController,
   rescheduleDeliveryController,
+  unconfirmedDeliveriesController,
+  getSessionStateController,
 } from './delivery.controller.js';
 import {
   cancelDeliverySchema,
+  confirmUnconfirmedDeliveriesSchema,
   correctDeliveryBodySchema,
   deliveryIdParamSchema,
   deliveryQuerySchema,
@@ -26,6 +30,8 @@ import {
   recordDeliveryOutcomeSchema,
   recordPaymentBodySchema,
   rescheduleDeliverySchema,
+  sessionStateQuerySchema,
+  unconfirmedDeliveriesQuerySchema,
 } from './delivery.schema.js';
 
 export const deliveryRoutes = new Hono<HonoEnv>();
@@ -40,6 +46,26 @@ deliveryRoutes.post(
   idempotency,
   validateBody(recordDeliveryOutcomeSchema),
   recordDeliveryOutcomeController,
+);
+
+// Previous-days scheduled deliveries with no recorded outcome, and bulk
+// confirmation of those rows.
+deliveryRoutes.get(
+  '/admin/unconfirmed',
+  auth,
+  tenant,
+  deliveryOrAdmin,
+  validateQuery(unconfirmedDeliveriesQuerySchema),
+  unconfirmedDeliveriesController,
+);
+
+deliveryRoutes.post(
+  '/admin/unconfirmed/confirm',
+  auth,
+  tenant,
+  deliveryOrAdmin,
+  validateBody(confirmUnconfirmedDeliveriesSchema),
+  confirmUnconfirmedDeliveriesController,
 );
 
 // Correction of a historical delivery record (optimistic-locked).
@@ -84,6 +110,15 @@ deliveryRoutes.post(
   validateParams(deliveryIdParamSchema),
   validateBody(recordPaymentBodySchema),
   recordPaymentController,
+);
+
+deliveryRoutes.get(
+  '/admin/session-state',
+  auth,
+  tenant,
+  deliveryOrAdmin,
+  validateQuery(sessionStateQuerySchema),
+  getSessionStateController,
 );
 
 deliveryRoutes.get(
