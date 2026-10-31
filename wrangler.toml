@@ -1,4 +1,4 @@
-name = "farmilky-api"
+name = "farmilky-engine"
 main = "src/worker.ts"
 compatibility_date = "2026-10-28"
 compatibility_flags = ["nodejs_compat"]
@@ -38,17 +38,19 @@ new_sqlite_classes = ["SseHub"]
 # R2 binding (IMAGES above) provides direct bucket access; access keys are not
 # required when using the R2 binding from the Worker.
 
+# ...
 [vars]
-NODE_ENV = "production"
-ALLOWED_ORIGINS = "https://admin.farmilky.com"
-BACKEND_URL = "https://api.farmilky.com"
+ALLOWED_ORIGINS = "https://farmilky-console.farmilky.workers.dev"
+BACKEND_URL = "https://farmilky-engine.farmilky.workers.dev"
 BRAND_PHONE = "9244237975"
-UPI_ID = ""
-UPI_NAME = "Farmilky"
-R2_ACCOUNT_ID = ""
+NODE_ENV = "production"
+R2_ACCOUNT_ID = "de769baf27e77f58f883fb20c2df7a3f"
 R2_BUCKET_NAME = "farmilky-products"
-R2_PUBLIC_URL = ""
 R2_KEY_PREFIX = "products"
+UPI_ID = "9424547907@slc"
+UPI_NAME = "Farmilky"
+# ...
+
 
 # Cron schedules are UTC. See src/worker.ts for the IST mapping.
 [triggers]
