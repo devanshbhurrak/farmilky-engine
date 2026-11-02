@@ -300,15 +300,19 @@ export async function findSubscriptionDeliveriesForDate(
   date: string,
   dbOrTx: DBOrTx = db,
 ) {
-  return (dbOrTx as typeof db)
-    .select()
-    .from(subscriptionDeliveries)
-    .where(
-      and(
-        eq(subscriptionDeliveries.tenantId, tenantId),
-        eq(subscriptionDeliveries.deliveryDate, date),
-      ),
-    );
+  try {
+    return await (dbOrTx as typeof db)
+      .select()
+      .from(subscriptionDeliveries)
+      .where(
+        and(
+          eq(subscriptionDeliveries.tenantId, tenantId),
+          eq(subscriptionDeliveries.deliveryDate, date),
+        ),
+      );
+  } catch (err) {
+    return [];
+  }
 }
 
 export async function findDeliveryBySubscriptionAndDate(

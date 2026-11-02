@@ -118,6 +118,7 @@ function hubStub(env: Env) {
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContextLike): Promise<Response> {
+    prepare(env);
     const url = new URL(request.url);
 
     if (url.pathname.startsWith('/api/sse/')) {
@@ -145,7 +146,19 @@ export default {
       return await getApp(env).fetch(request, env, ctx);
     } catch (err) {
       logger.error({ err }, 'Worker request failed');
-      return Response.json({ success: false, message: 'Internal server error' }, { status: 500 });
+      const origin = request.headers.get('origin');
+      const headers = new Headers({ 'content-type': 'application/json' });
+      if (origin) {
+        const { env: cfg } = await import('./shared/config/env.js');
+        if (cfg.allowedOrigins.includes(origin) || cfg.allowedOrigins.includes('*')) {
+          headers.set('access-control-allow-origin', origin);
+          headers.set('access-control-allow-credentials', 'true');
+        }
+      }
+      return new Response(JSON.stringify({ success: false, message: 'Internal server error' }), {
+        status: 500,
+        headers,
+      });
     }
   },
 
