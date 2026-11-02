@@ -2124,12 +2124,31 @@ export async function getDeliveryBoard(
   // Materialize today's/past scheduled deliveries so the board is a stable
   // ledger (and previous-days shortages are visible), then include already
   // served deliveries that dropped out of the "due" window.
-  const [ledger, legacy] = await Promise.all([
-    findDeliveryLedgerForDate(tenantId, date, 'subscription', dbOrTx),
-    findSubscriptionDeliveriesForDate(tenantId, date, dbOrTx),
-  ]);
-  await ensureSubscriptionDeliveryRows(tenantId, date, supply.items, opts.slot, dbOrTx, ledger, legacy);
-  const subs = await includeLedgerSubscriptions(tenantId, supply.items, ledger, legacy, dbOrTx);
+  let ledger: DeliveryLedgerRow[] = [];
+  let legacy: SubscriptionDelivery[] = [];
+  try {
+    const [ledgerRes, legacyRes] = await Promise.all([
+      findDeliveryLedgerForDate(tenantId, date, 'subscription', dbOrTx),
+      findSubscriptionDeliveriesForDate(tenantId, date, dbOrTx),
+    ]);
+    ledger = ledgerRes;
+    legacy = legacyRes;
+  } catch (err) {
+    logger.warn({ err, tenantId, date }, 'Failed to query delivery ledger / legacy deliveries for board');
+  }
+
+  try {
+    await ensureSubscriptionDeliveryRows(tenantId, date, supply.items, opts.slot, dbOrTx, ledger, legacy);
+  } catch (err) {
+    logger.warn({ err, tenantId, date }, 'ensureSubscriptionDeliveryRows failed');
+  }
+
+  let subs: SubWithSlots[] = supply.items;
+  try {
+    subs = await includeLedgerSubscriptions(tenantId, supply.items, ledger, legacy, dbOrTx);
+  } catch (err) {
+    logger.warn({ err, tenantId, date }, 'includeLedgerSubscriptions failed');
+  }
 
   let entries: BoardEntry[];
   try {

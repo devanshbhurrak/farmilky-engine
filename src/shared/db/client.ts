@@ -1,10 +1,17 @@
 import { drizzle as drizzleNodePg, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { drizzle as drizzleNeon } from 'drizzle-orm/neon-serverless';
 import { Pool as NodePgPool } from 'pg';
-import { Pool as NeonPool } from '@neondatabase/serverless';
+import { Pool as NeonPool, neonConfig } from '@neondatabase/serverless';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import * as schema from './schema/index.js';
 import { isWorkersRuntime } from '../config/env.js';
 import dns from 'node:dns';
+
+// In Cloudflare Workers, route pool queries through HTTP fetch to eliminate
+// cross-request WebSocket reuse errors and isolate state conflicts.
+if (isWorkersRuntime()) {
+  neonConfig.poolQueryViaFetch = true;
+}
 
 // If Node's default OS DNS resolver fails or returns intermittent ENOTFOUND for Neon endpoints,
 // install a resilient fallback using resolve4 with public DNS resolvers in non-Workers environments.
@@ -38,9 +45,39 @@ if (!isWorkersRuntime() && typeof process !== 'undefined') {
   }
 }
 
+export interface WorkerScopeContext {
+  db: any;
+  pool: NeonPool;
+}
+
+export const workerScope = new AsyncLocalStorage<WorkerScopeContext>();
+
 let databaseUrlOverride: string | undefined;
 let queryClient: NodePgPool | NeonPool | undefined;
 let dbInstance: any | undefined;
+let fallbackWorkersDb: any | undefined;
+
+/**
+ * Creates an isolated database client and connection pool strictly bound to a single
+ * request's lifecycle in Cloudflare Workers.
+ */
+export function createScopedWorkersDb(connectionString: string): {
+  db: any;
+  pool: NeonPool;
+  cleanup: () => Promise<void>;
+} {
+  neonConfig.poolQueryViaFetch = true;
+  const pool = new NeonPool({ connectionString });
+  const db = drizzleNeon(pool, { schema });
+  const cleanup = async () => {
+    try {
+      await pool.end();
+    } catch {
+      // Ignore cleanup error if already closed
+    }
+  };
+  return { db, pool, cleanup };
+}
 
 /**
  * Workers cannot read a local .env or rely on process.env, so the Worker entry
@@ -48,15 +85,18 @@ let dbInstance: any | undefined;
  */
 export function configureDb(connectionString?: string): void {
   if (!connectionString) return;
-  if (databaseUrlOverride && databaseUrlOverride !== connectionString && queryClient) {
-    void (queryClient as any).end?.().catch(() => undefined);
+  if (databaseUrlOverride && databaseUrlOverride !== connectionString) {
+    if (queryClient && 'end' in queryClient) {
+      void (queryClient as any).end?.().catch(() => undefined);
+    }
     queryClient = undefined;
     dbInstance = undefined;
+    fallbackWorkersDb = undefined;
   }
   databaseUrlOverride = connectionString;
 }
 
-function getDatabaseUrl(): string {
+export function getDatabaseUrl(): string {
   const rawUrl = databaseUrlOverride ?? (typeof process !== 'undefined' ? process.env.DATABASE_URL : undefined);
   if (!rawUrl) throw new Error('DATABASE_URL is not set');
 
@@ -67,30 +107,36 @@ function getDatabaseUrl(): string {
 }
 
 function getDb(): any {
+  if (isWorkersRuntime()) {
+    const store = workerScope.getStore();
+    if (store?.db) {
+      return store.db;
+    }
+    if (!fallbackWorkersDb) {
+      neonConfig.poolQueryViaFetch = true;
+      const connectionString = getDatabaseUrl();
+      const pool = new NeonPool({ connectionString });
+      fallbackWorkersDb = drizzleNeon(pool, { schema });
+    }
+    return fallbackWorkersDb;
+  }
+
   if (!dbInstance) {
     const connectionString = getDatabaseUrl();
-
-    if (isWorkersRuntime()) {
-      // Cloudflare Workers environment: use Neon serverless pool over WebSockets
-      const pool = new NeonPool({ connectionString });
-      queryClient = pool;
-      dbInstance = drizzleNeon(pool, { schema });
-    } else {
-      // Node.js local environment: use standard pg Pool
-      const pool = new NodePgPool({
-        connectionString,
-        max: 10,
-        idleTimeoutMillis: 30_000,
-        connectionTimeoutMillis: 10_000,
-        allowExitOnIdle: true,
-        application_name: 'farmilky-api',
-      });
-      pool.on('error', () => {
-        // Pool-level errors
-      });
-      queryClient = pool;
-      dbInstance = drizzleNodePg(pool, { schema });
-    }
+    // Node.js local environment: use standard pg Pool
+    const pool = new NodePgPool({
+      connectionString,
+      max: 10,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 10_000,
+      allowExitOnIdle: true,
+      application_name: 'farmilky-api',
+    });
+    pool.on('error', () => {
+      // Pool-level errors
+    });
+    queryClient = pool;
+    dbInstance = drizzleNodePg(pool, { schema });
   }
   return dbInstance;
 }
@@ -116,5 +162,6 @@ export async function closeDB(): Promise<void> {
   }
   queryClient = undefined;
   dbInstance = undefined;
+  fallbackWorkersDb = undefined;
 }
 

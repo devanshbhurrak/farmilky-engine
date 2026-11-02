@@ -1,6 +1,6 @@
 import { createApp } from './app.js';
 import { configureEnv, isWorkersRuntime, validateEnv } from './shared/config/env.js';
-import { configureDb } from './shared/db/client.js';
+import { configureDb, createScopedWorkersDb, workerScope, getDatabaseUrl } from './shared/db/client.js';
 import { initCache } from './shared/cache/index.js';
 import { configureStorage } from './shared/storage/types.js';
 import { createR2BindingStorage } from './shared/storage/r2Binding.js';
@@ -106,7 +106,16 @@ export class SseHub {
       sseManager.broadcast(body.key, body.event);
       return new Response('ok');
     }
-    return this.app.fetch(request, this.env, this.ctx);
+
+    const connStr = this.env.HYPERDRIVE?.connectionString ?? this.env.DATABASE_URL ?? getDatabaseUrl();
+    const { db: reqDb, pool, cleanup } = createScopedWorkersDb(connStr);
+    try {
+      return await workerScope.run({ db: reqDb, pool }, async () => {
+        return await this.app.fetch(request, this.env, this.ctx);
+      });
+    } finally {
+      this.ctx.waitUntil(cleanup());
+    }
   }
 }
 
@@ -119,38 +128,45 @@ function hubStub(env: Env) {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContextLike): Promise<Response> {
     prepare(env);
-    const url = new URL(request.url);
-
-    if (url.pathname.startsWith('/api/sse/')) {
-      const stub = hubStub(env);
-      if (stub) return stub.fetch(request);
-    }
-
-    const stub = hubStub(env);
-    if (stub) {
-      configureRemoteBroadcast((key, event) => {
-        const body = JSON.stringify({ key, event });
-        ctx.waitUntil(
-          stub.fetch(
-            new Request('https://sse.internal/internal/broadcast', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body,
-            }),
-          ),
-        );
-      });
-    }
+    const connStr = env.HYPERDRIVE?.connectionString ?? env.DATABASE_URL ?? getDatabaseUrl();
+    const { db: reqDb, pool, cleanup } = createScopedWorkersDb(connStr);
 
     try {
-      return await getApp(env).fetch(request, env, ctx);
+      return await workerScope.run({ db: reqDb, pool }, async () => {
+        const url = new URL(request.url);
+
+        if (url.pathname.startsWith('/api/sse/')) {
+          const stub = hubStub(env);
+          if (stub) return stub.fetch(request);
+        }
+
+        const stub = hubStub(env);
+        if (stub) {
+          configureRemoteBroadcast((key, event) => {
+            const body = JSON.stringify({ key, event });
+            ctx.waitUntil(
+              stub.fetch(
+                new Request('https://sse.internal/internal/broadcast', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body,
+                }),
+              ),
+            );
+          });
+        }
+
+        return await getApp(env).fetch(request, env, ctx);
+      });
     } catch (err) {
       logger.error({ err }, 'Worker request failed');
       const origin = request.headers.get('origin');
       const headers = new Headers({ 'content-type': 'application/json' });
       if (origin) {
         const { env: cfg } = await import('./shared/config/env.js');
-        if (cfg.allowedOrigins.includes(origin) || cfg.allowedOrigins.includes('*')) {
+        const allowed = cfg.allowedOrigins.map((o) => o.trim().replace(/\/$/, ''));
+        const reqOrigin = origin.trim().replace(/\/$/, '');
+        if (allowed.includes(reqOrigin) || allowed.includes('*')) {
           headers.set('access-control-allow-origin', origin);
           headers.set('access-control-allow-credentials', 'true');
         }
@@ -159,10 +175,12 @@ export default {
         status: 500,
         headers,
       });
+    } finally {
+      ctx.waitUntil(cleanup());
     }
   },
 
-  async scheduled(controller: ScheduledControllerLike, env: Env, _ctx: ExecutionContextLike): Promise<void> {
+  async scheduled(controller: ScheduledControllerLike, env: Env, ctx: ExecutionContextLike): Promise<void> {
     prepare(env);
     const job = CRON_SCHEDULE[controller.cron];
     if (!job) {
@@ -173,12 +191,18 @@ export default {
     // UTC→IST rollover is covered; only execute on the 1st in IST.
     if (job === 'monthly-invoice' && istDayOfMonth() !== 1) return;
 
+    const connStr = env.HYPERDRIVE?.connectionString ?? env.DATABASE_URL ?? getDatabaseUrl();
+    const { db: reqDb, pool, cleanup } = createScopedWorkersDb(connStr);
     try {
-      await runJobNow(job);
-      logger.info({ job, cron: controller.cron }, 'Cron job completed');
+      await workerScope.run({ db: reqDb, pool }, async () => {
+        await runJobNow(job);
+        logger.info({ job, cron: controller.cron }, 'Cron job completed');
+      });
     } catch (err) {
       logger.error({ err, job }, 'Cron job failed');
       throw err;
+    } finally {
+      ctx.waitUntil(cleanup());
     }
   },
 };
