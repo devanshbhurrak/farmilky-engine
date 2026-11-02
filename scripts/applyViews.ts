@@ -1,12 +1,12 @@
 import 'dotenv/config';
-import postgres from 'postgres';
+import { Pool } from 'pg';
 
 const url = process.env.DATABASE_URL;
 if (!url) throw new Error('DATABASE_URL is not set');
 
-const sql = postgres(url, { max: 1 });
+const pool = new Pool({ connectionString: url, max: 1 });
 
-await sql.unsafe(`
+await pool.query(`
 CREATE OR REPLACE VIEW manifest_summary AS
 SELECT
   manifest_id,
@@ -19,5 +19,5 @@ FROM manifest_entries
 GROUP BY manifest_id;
 `);
 
-await sql.end();
+await pool.end();
 console.log('manifest_summary view applied.');

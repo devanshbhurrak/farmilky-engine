@@ -94,21 +94,24 @@ export async function findActiveTransactionByRef(
   referenceType: NonNullable<InsertTxnRow['referenceType']>,
   referenceId: string,
   tx: DrizzleTx | DBOrTx = db,
+  entryType?: 'debit' | 'credit',
 ) {
   // Mirrors the subscription-delivery lookup: excludes reversal rows and
   // prefers the earliest charge so a re-record never voids a reversal.
+  const conditions = [
+    eq(transactions.tenantId, tenantId),
+    eq(transactions.referenceType, referenceType),
+    eq(transactions.referenceId, referenceId),
+    eq(transactions.status, 'active' as const),
+    sql`NOT EXISTS (SELECT 1 FROM transactions r WHERE r.voided_by_txn_id = transactions.id)`,
+  ];
+  if (entryType) {
+    conditions.push(eq(transactions.entryType, entryType));
+  }
   const rows = await tx
     .select()
     .from(transactions)
-    .where(
-      and(
-        eq(transactions.tenantId, tenantId),
-        eq(transactions.referenceType, referenceType),
-        eq(transactions.referenceId, referenceId),
-        eq(transactions.status, 'active' as const),
-        sql`NOT EXISTS (SELECT 1 FROM transactions r WHERE r.voided_by_txn_id = transactions.id)`,
-      ),
-    )
+    .where(and(...conditions))
     .orderBy(transactions.createdAt)
     .limit(1);
   return rows[0] ?? null;

@@ -3,8 +3,8 @@ import { withTransaction } from '../../shared/db/transaction.js';
 import { AppError } from '../../shared/middleware/errorHandler.js';
 import type { DBOrTx, DrizzleTx } from '../../shared/types/index.js';
 import { and, eq, sql } from 'drizzle-orm';
-import { round2, toDateOnlyString, addDays } from '../../shared/utils/dateUtils.js';
-import { istToday } from '../../shared/utils/dateUtils.js';
+import { logger } from '../../shared/utils/logger.js';
+import { round2, toDateOnlyString, addDays, istToday, istNow } from '../../shared/utils/dateUtils.js';
 import {
   advanceToNextDue,
   isSubscriptionDueOnDate,
@@ -192,12 +192,22 @@ export async function recordDeliveryOutcome(
       unit?: string | null;
       quantity: number;
       unitPrice: number;
+      deliveredQuantity?: number;
+      itemStatus?: DeliveryStatus;
+      status?: DeliveryStatus;
+      failureReason?: string | null;
+      failureNotes?: string | null;
     }>;
     paymentMode?: (typeof deliveries.paymentMode.enumValues)[number] | null;
     reason?: string | null;
     notes?: string | null;
     idempotencyKey?: string | null;
     expectedVersion?: number | null;
+    paymentReceived?: {
+      amount: number;
+      paymentMethod?: string;
+      paymentRef?: string | null;
+    } | null;
   },
   actorId: string,
   tx?: DrizzleTx,
@@ -284,6 +294,10 @@ export async function recordDeliveryOutcome(
       quantity: number;
       unitPrice: number;
       amount: number;
+      deliveredQuantity?: number | null;
+      itemStatus?: DeliveryStatus;
+      failureReason?: string | null;
+      failureNotes?: string | null;
     }> = [];
     let resolvedPrice = num(input.pricePerPacket ?? 0);
 
@@ -292,6 +306,13 @@ export async function recordDeliveryOutcome(
         const resolved = await resolveUnitPrice(tenantId, input.customerId, it.productId, it.variantId ?? null, t);
         const unitPrice = it.unitPrice > 0 ? it.unitPrice : resolved.price;
         const qty = num(it.quantity);
+        const itemDeliveredQty = it.deliveredQuantity !== undefined
+          ? num(it.deliveredQuantity)
+          : (input.status === 'delivered' ? qty : 0);
+        const itemStatus = it.itemStatus ?? it.status ?? input.status;
+        const itemFailureReason = it.failureReason ?? (itemStatus === 'failed' ? input.reason ?? null : null);
+        const itemAmount = round2(unitPrice * (chargeable ? itemDeliveredQty : 0));
+
         rows.push({
           productId: it.productId,
           variantId: it.variantId ?? null,
@@ -300,7 +321,11 @@ export async function recordDeliveryOutcome(
           unit: it.unit ?? resolved.unit ?? null,
           quantity: qty,
           unitPrice,
-          amount: round2(unitPrice * qty),
+          amount: itemAmount,
+          deliveredQuantity: itemDeliveredQty,
+          itemStatus,
+          failureReason: itemFailureReason,
+          failureNotes: it.failureNotes ?? null,
         });
         if (resolvedPrice === 0) resolvedPrice = unitPrice;
       }
@@ -347,7 +372,12 @@ export async function recordDeliveryOutcome(
     }
 
     if (input.pricePerPacket == null) input.pricePerPacket = resolvedPrice;
-    const finalQty = chargeableQty(input.status, num(input.scheduledQuantity ?? scheduledQty), input.actualQuantity);
+    let finalQty = 0;
+    if (input.items && input.items.length > 0) {
+      finalQty = rows.reduce((acc, r) => acc + (r.deliveredQuantity ?? (input.status === 'delivered' ? r.quantity : 0)), 0);
+    } else {
+      finalQty = chargeableQty(input.status, num(input.scheduledQuantity ?? scheduledQty), input.actualQuantity);
+    }
     // For multi-item deliveries (or single item), sum the amounts accurately
     const calculatedRowsTotal = rows.reduce((acc, r) => acc + r.amount, 0);
     const finalAmount = rows.length > 1
@@ -359,7 +389,7 @@ export async function recordDeliveryOutcome(
     let previousTxnId: string | null = null;
     let ledgerChanged = false;
     if (existing && chargeable && CHARGEABLE[existing.status as DeliveryStatus]) {
-      const linked = await findActiveTransactionByRef(tenantId, 'delivery', existing.id, t);
+      const linked = await findActiveTransactionByRef(tenantId, 'delivery', existing.id, t, 'debit');
       if (linked) {
         await transactionService.voidTransaction(linked.id, tenantId, 'Delivery outcome re-recorded', actorId, t);
         previousTxnId = linked.id;
@@ -431,6 +461,10 @@ export async function recordDeliveryOutcome(
       quantity: String(r.quantity),
       unitPrice: money(r.unitPrice),
       amount: money(r.amount),
+      deliveredQuantity: r.deliveredQuantity !== undefined && r.deliveredQuantity !== null ? String(r.deliveredQuantity) : null,
+      itemStatus: r.itemStatus ?? (input.status as any),
+      failureReason: r.failureReason ?? null,
+      failureNotes: r.failureNotes ?? null,
     }));
     if (deliveryItemsRows.length > 0) await insertDeliveryItems(delivery.id, deliveryItemsRows, t);
 
@@ -498,6 +532,41 @@ export async function recordDeliveryOutcome(
           await updateSubscriptionRow(tenantId, sub.id, { nextDeliveryDate: next }, t);
         }
       }
+      // ---- delivery-time payment & targeted settlement ----
+      if (input.paymentReceived && input.paymentReceived.amount > 0) {
+        const payAmount = round2(num(input.paymentReceived.amount));
+        const paymentTxn = await transactionService.createTransaction(
+          {
+            tenantId,
+            partyType: 'customer',
+            partyId: input.customerId,
+            txnType: 'payment',
+            entryType: 'credit',
+            amount: payAmount,
+            effectiveDate: input.deliveryDate,
+            referenceType: 'delivery',
+            referenceId: delivery.id,
+            paymentMethod: (input.paymentReceived.paymentMethod ?? 'cash') as any,
+            paymentRef: input.paymentReceived.paymentRef ?? null,
+            receivedDate: input.deliveryDate,
+            description: `Payment for delivery ${input.deliveryDate}`,
+            createdById: actorId,
+          },
+          t,
+        );
+
+        const { settlementService } = await import('../transactions/settlement.service.js');
+        await settlementService.allocateTargeted(tenantId, paymentTxn.id, txn.id, payAmount, t);
+
+        const initialStatus = payAmount >= finalAmount ? 'paid' : 'partially_paid';
+        await updateDeliveryOptimistic(
+          tenantId,
+          delivery.id,
+          { paymentStatus: initialStatus, updatedAt: new Date() },
+          num(delivery.version),
+          t,
+        );
+      }
     }
 
     const found = await findDeliveryWithItems(tenantId, delivery.id, t);
@@ -532,7 +601,7 @@ export async function correctDelivery(
 
     const oldChargeable = CHARGEABLE[existing.status as DeliveryStatus];
     if (oldChargeable) {
-      const linked = await findActiveTransactionByRef(tenantId, 'delivery', deliveryId, t);
+      const linked = await findActiveTransactionByRef(tenantId, 'delivery', deliveryId, t, 'debit');
       if (linked) {
         await transactionService.voidTransaction(linked.id, tenantId, 'Delivery corrected', actorId, t);
         await restoreStock(tenantId, null, null, num(existing.actualQuantity ?? 0), t);
@@ -662,7 +731,7 @@ export async function cancelDelivery(
     if (!existing) throw new AppError('Delivery not found', 404);
     const chargeable = CHARGEABLE[existing.status as DeliveryStatus];
     if (chargeable) {
-      const linked = await findActiveTransactionByRef(tenantId, 'delivery', deliveryId, t);
+      const linked = await findActiveTransactionByRef(tenantId, 'delivery', deliveryId, t, 'debit');
       if (linked) {
         await transactionService.voidTransaction(linked.id, tenantId, 'Delivery cancelled', actorId, t);
         if (input.restock !== false) {
@@ -738,9 +807,15 @@ export async function recordPaymentAgainstDelivery(
     );
 
     const charges = await findActiveChargeTransactionsForDelivery(tenantId, 'delivery', deliveryId, t);
+    const targetDebit = charges[0];
+    if (targetDebit) {
+      const { settlementService } = await import('../transactions/settlement.service.js');
+      await settlementService.allocateTargeted(tenantId, txn.id, targetDebit.id, amount, t);
+    }
+
     const credits = await findActiveCreditTransactionsForDelivery(tenantId, 'delivery', deliveryId, t);
     const totalCharged = charges.reduce((s, c) => s + num(c.amount), 0);
-    const totalCredited = credits.reduce((s, c) => s + num(c.amount), 0) + amount;
+    const totalCredited = credits.reduce((s, c) => s + num(c.amount), 0);
     const outstanding = Math.max(0, round2(totalCharged - totalCredited));
     let paymentStatus: DeliveryPaymentStatus = 'pending';
     if (totalCharged > 0 && totalCredited >= totalCharged) paymentStatus = 'paid';
@@ -809,10 +884,22 @@ async function decrementStock(
 ): Promise<void> {
   if (!(qty > 0)) return;
   if (variantId) {
-    await decrementVariantStock(tenantId, variantId, qty, t);
+    try {
+      await decrementVariantStock(tenantId, variantId, qty, t);
+    } catch (err) {
+      if (err instanceof AppError && err.status === 409) {
+        // Stock check disabled on delivery: log warning instead of failing delivery outcome
+        logger.warn({ tenantId, variantId, qty }, 'Insufficient stock for variant on delivery — skipping stock decrement');
+        return;
+      }
+      throw err;
+    }
   } else if (productId) {
     const updated = await decrementProductStockRow(tenantId, productId, qty, t);
-    if ((updated as unknown[]).length === 0) throw new AppError('Insufficient stock for product', 409);
+    if ((updated as unknown[]).length === 0) {
+      // Stock check disabled on delivery: log warning instead of failing delivery outcome
+      logger.warn({ tenantId, productId, qty }, 'Insufficient stock for product on delivery — skipping stock decrement');
+    }
   }
 }
 
@@ -842,35 +929,53 @@ export async function confirmUnconfirmedDeliveries(
   tx?: DrizzleTx,
 ) {
   const run = async (t: DrizzleTx) => {
-    const from = toDateOnlyString(istToday());
-    const to = toDateOnlyString(addDays(from, (input.days ?? 7) - 1));
+    const today = toDateOnlyString(istToday());
+    const days = Math.max(1, input.days ?? 7);
+    // Unconfirmed deliveries to confirm are past deliveries up to yesterday
+    const cursorEnd = toDateOnlyString(addDays(today, -1));
+    const cursorStart = toDateOnlyString(addDays(today, -days));
+
     const conditions = [
       eq(deliveries.tenantId, tenantId),
       eq(deliveries.type, 'subscription'),
       eq(deliveries.status, 'pending'),
-      sql`${deliveries.deliveryDate} >= ${from}`,
-      sql`${deliveries.deliveryDate} <= ${to}`,
+      sql`${deliveries.deliveryDate} >= ${cursorStart}`,
+      sql`${deliveries.deliveryDate} <= ${cursorEnd}`,
     ];
     if (input.slot) conditions.push(eq(deliveries.deliverySlot, input.slot));
     const where = and(...conditions);
     const list = await t.select().from(deliveries).where(where);
-    const ids = list.map((r) => r.id);
-    if (ids.length === 0) return { confirmed: 0, deliveries: [] };
-    const updated = await Promise.all(
-      ids.map((id) =>
-        updateDeliveryOptimistic(tenantId, id, {
-          status: 'extra',
-          reason: `Bulk confirmed on ${from} via ${actorId}`,
-          notes: `Automatically confirmed a set of pending subscriptions`,
-          handledById: actorId,
-          updatedAt: new Date(),
-        }, num(list.find((r) => r.id === id)?.version ?? 0), t),
-      ),
-    );
-    const confirmed = updated.filter(Boolean).length;
-    const confirmedIds = ids.filter((_, i) => updated[i]);
-    const deliveryItems = await findDeliveryWithItems(tenantId, confirmedIds[0] ?? ids[0], t);
-    return { confirmed, deliveries: [deliveryItems] };
+
+    let confirmed = 0;
+    let failed = 0;
+    const confirmedDeliveries: any[] = [];
+
+    for (const item of list) {
+      try {
+        const result = await recordDeliveryOutcome(
+          tenantId,
+          {
+            customerId: item.customerId,
+            type: 'subscription',
+            referenceType: (item.referenceType as 'subscription' | 'order' | null) ?? null,
+            referenceId: item.referenceId,
+            deliveryDate: item.deliveryDate,
+            deliverySlot: (item.deliverySlot as 'morning' | 'evening' | null) ?? null,
+            status: 'delivered',
+            reason: `Bulk confirmed on ${today} via ${actorId}`,
+          },
+          actorId,
+          t,
+        );
+        confirmed++;
+        confirmedDeliveries.push(result.delivery);
+      } catch (err) {
+        failed++;
+        logger.error({ err, deliveryId: item.id }, 'Failed to bulk confirm delivery');
+      }
+    }
+
+    return { confirmed, failed, deliveries: confirmedDeliveries };
   };
   return tx ? await run(tx) : await withTransaction(run);
 }
@@ -893,6 +998,13 @@ export async function listUnconfirmedDeliveries(
 }
 
 export function isEveningOpen(date: string): boolean {
-  const dayOfWeek = new Date(date).getDay();
-  return dayOfWeek === 0 || dayOfWeek === 6;
+  const today = toDateOnlyString(istToday());
+  // For future dates, evening is locked until that day arrives
+  if (date > today) return false;
+  // For past dates, evening is already open
+  if (date < today) return true;
+  // For today: evening opens at 17:00 IST (5:00 PM)
+  // istNow() is computed as new Date(Date.now() + 5.5 hours), so its UTC methods represent IST components!
+  const now = istNow();
+  return now.getUTCHours() >= 17;
 }

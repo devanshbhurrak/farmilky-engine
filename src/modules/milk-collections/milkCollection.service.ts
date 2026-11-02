@@ -38,6 +38,7 @@ export interface CollectionDTO {
   id: string;
   supplierId: string;
   supplierName: string | null;
+  supplierPhone?: string | null;
   date: string;
   session: string;
   expectedQty: number;
@@ -65,6 +66,7 @@ function mapCollectionRow(row: CollectionRow): CollectionDTO {
     id: row.id,
     supplierId: row.supplierId,
     supplierName: row.supplierName ?? null,
+    supplierPhone: row.supplierPhone ?? null,
     date: row.date,
     session: row.session,
     expectedQty: toNum(row.expectedQty),

@@ -26,6 +26,7 @@ export interface CollectionRow {
   id: string;
   supplierId: string;
   supplierName: string | null;
+  supplierPhone?: string | null;
   date: string;
   session: 'morning' | 'evening';
   expectedQty: string | null;
@@ -129,6 +130,7 @@ export async function listCollectionsByDate(
       id: milkCollections.id,
       supplierId: milkCollections.supplierId,
       supplierName: suppliers.name,
+      supplierPhone: suppliers.phone,
       date: milkCollections.collectionDate,
       session: milkCollections.session,
       expectedQty: milkCollections.expectedQty,
@@ -304,6 +306,7 @@ export async function listCollectionsInRange(tenantId: string, startDate: string
       id: milkCollections.id,
       supplierId: milkCollections.supplierId,
       supplierName: suppliers.name,
+      supplierPhone: suppliers.phone,
       date: milkCollections.collectionDate,
       session: milkCollections.session,
       expectedQty: milkCollections.expectedQty,

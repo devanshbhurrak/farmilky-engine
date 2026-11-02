@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { readdir, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import postgres from 'postgres';
+import { Pool } from 'pg';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dbDir = join(here, '..', 'src', 'shared', 'db');
@@ -12,9 +12,9 @@ const migrationsDir = join(dbDir, 'migrations');
 const url = process.env.DATABASE_URL;
 if (!url) throw new Error('DATABASE_URL is not set');
 
-const sql = postgres(url, { max: 1 });
+const pool = new Pool({ connectionString: url, max: 1 });
 const contents = await readFile(sqlFile, 'utf8');
-await sql.unsafe(contents);
+await pool.query(contents);
 
 let migrations: string[] = [];
 try {
@@ -24,9 +24,9 @@ try {
 }
 for (const file of migrations) {
   const migration = await readFile(join(migrationsDir, file), 'utf8');
-  await sql.unsafe(migration);
+  await pool.query(migration);
   console.log(`Migration applied: ${file}`);
 }
 
-await sql.end();
+await pool.end();
 console.log('RLS policies applied.');

@@ -52,6 +52,7 @@ export const recordDeliveryOutcomeController = async (c: Context) => {
       notes: body.notes ?? null,
       idempotencyKey: body.idempotencyKey ?? null,
       expectedVersion: body.expectedVersion,
+      paymentReceived: body.paymentReceived ?? null,
     },
     user.id,
   );
