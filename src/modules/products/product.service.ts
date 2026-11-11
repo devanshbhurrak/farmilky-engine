@@ -243,7 +243,7 @@ export async function updateProduct(
           quantity: 1,
           unit: updated.unit,
           price: updated.basePrice ?? 0,
-          stock: updated.stock ?? 0,
+          stock: updated.stock == null ? 0 : Number(updated.stock),
           isDefault: true,
           isAvailable: updated.isAvailable ?? true,
           sortOrder: 0,

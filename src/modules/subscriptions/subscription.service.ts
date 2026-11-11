@@ -223,7 +223,7 @@ async function resolveSubscriptionVariant(
         quantity: 1,
         unit: product.unit,
         price: product.basePrice ?? 0,
-        stock: product.stock ?? 0,
+        stock: product.stock == null ? 0 : Number(product.stock),
         isDefault: true,
         isAvailable: true,
         sortOrder: 0,

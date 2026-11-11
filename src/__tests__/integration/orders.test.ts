@@ -38,9 +38,9 @@ dbOnly('orders flow', () => {
     } as never);
     const variantId = (product.variants as Array<{ id: string }>)[0].id;
 
-    const stockOf = async () => {
+const stockOf = async () => {
       const rows = await db.select().from(productVariants).where(eq(productVariants.id, variantId)).limit(1);
-      return rows[0]?.stock ?? -1;
+      return Number(rows[0]?.stock ?? -1);
     };
 
     await addItem(tenantId, userId, { productId: product.id, variantId, quantity: 3 });

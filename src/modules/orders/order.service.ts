@@ -74,7 +74,7 @@ async function prepareItemsAndDecrementStock(
       if (variant.productId !== item.productId) {
         throw new AppError('Variant does not belong to product', 400);
       }
-      if (variant.stock < item.quantity) {
+      if (Number(variant.stock) < item.quantity) {
         throw new AppError(`Insufficient stock for variant ${variant.label}`, 409);
       }
       const resolved = await resolvePrice(tenantId, pricingUserId, item.variantId, t);
@@ -95,7 +95,7 @@ async function prepareItemsAndDecrementStock(
         throw new AppError(`Price not available for product ${product.name}`, 400);
       }
       unitPrice = Number(product.basePrice);
-      if (product.stock < item.quantity) {
+      if (Number(product.stock) < item.quantity) {
         throw new AppError(`Insufficient stock for product ${product.name}`, 409);
       }
       const updated = await decrementProductStockRow(tenantId, item.productId, item.quantity, t);

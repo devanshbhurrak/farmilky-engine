@@ -59,7 +59,7 @@ export async function getCart(
     let unitPrice: number;
     let variantLabel: string | null = null;
     let originalPrice: number | null = null;
-    let stock: number | null = product.stock;
+    let stock: number | null = product.stock == null ? null : Number(product.stock);
     if (item.variantId) {
       const variant = await findVariantById(tenantId, item.variantId, dbOrTx);
       if (!variant) continue;
@@ -67,7 +67,7 @@ export async function getCart(
       unitPrice = resolved.price;
       variantLabel = variant.label;
       originalPrice = Number(variant.price);
-      stock = variant.stock;
+      stock = variant.stock == null ? null : Number(variant.stock);
     } else {
       if (product.basePrice === null || product.basePrice === undefined) continue;
       unitPrice = Number(product.basePrice);

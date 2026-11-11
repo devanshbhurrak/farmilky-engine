@@ -105,7 +105,7 @@ export interface NewProductRow {
   basePrice?: number | string | null;
   unit?: typeof products.unit.enumValues[number];
   fatContent?: number | string | null;
-  stock?: number;
+  stock?: number | string;
   imageUrl?: string | null;
   isAvailable?: boolean;
   sortOrder?: number;
@@ -122,7 +122,7 @@ export async function createProductRow(tenantId: string, data: NewProductRow, db
       basePrice: data.basePrice == null ? null : String(data.basePrice),
       unit: data.unit ?? 'L',
       fatContent: data.fatContent == null ? null : String(data.fatContent),
-      stock: data.stock ?? 0,
+      stock: data.stock == null ? '0' : String(data.stock),
       imageUrl: data.imageUrl ?? null,
       isAvailable: data.isAvailable ?? true,
       sortOrder: data.sortOrder ?? 0,
@@ -144,7 +144,7 @@ export async function updateProductRow(
   if (data.basePrice !== undefined) patch.basePrice = data.basePrice == null || data.basePrice === '' ? null : String(data.basePrice);
   if (data.unit !== undefined) patch.unit = data.unit;
   if (data.fatContent !== undefined) patch.fatContent = data.fatContent == null || data.fatContent === '' ? null : String(data.fatContent);
-  if (data.stock !== undefined) patch.stock = data.stock;
+  if (data.stock !== undefined) patch.stock = String(data.stock);
   if (data.imageUrl !== undefined) patch.imageUrl = data.imageUrl;
   if (data.isAvailable !== undefined) patch.isAvailable = data.isAvailable;
   if (data.sortOrder !== undefined) patch.sortOrder = data.sortOrder;
@@ -171,7 +171,7 @@ export interface NewVariantRow {
   unit: typeof productVariants.unit.enumValues[number];
   price: number | string;
   discountedPrice?: number | string | null;
-  stock?: number;
+  stock?: number | string;
   isDefault?: boolean;
   isAvailable?: boolean;
   sortOrder?: number;
@@ -195,7 +195,7 @@ export async function createVariantRows(
         unit: v.unit,
         price: String(v.price),
         discountedPrice: v.discountedPrice == null || v.discountedPrice === '' ? null : String(v.discountedPrice),
-        stock: v.stock ?? 0,
+        stock: v.stock == null ? '0' : String(v.stock),
         isDefault: v.isDefault ?? false,
         isAvailable: v.isAvailable ?? true,
         sortOrder: v.sortOrder ?? 0,
@@ -218,7 +218,7 @@ export async function updateVariantRow(
   if (data.price !== undefined) patch.price = String(data.price);
   if (data.discountedPrice !== undefined)
     patch.discountedPrice = data.discountedPrice == null || data.discountedPrice === '' ? null : String(data.discountedPrice);
-  if (data.stock !== undefined) patch.stock = data.stock;
+  if (data.stock !== undefined) patch.stock = String(data.stock);
   if (data.isDefault !== undefined) patch.isDefault = data.isDefault;
   if (data.isAvailable !== undefined) patch.isAvailable = data.isAvailable;
   if (data.sortOrder !== undefined) patch.sortOrder = data.sortOrder;
